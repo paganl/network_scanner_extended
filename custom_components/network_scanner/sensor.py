@@ -71,7 +71,15 @@ class NetworkScanner(Entity):
 
     def scan_network(self):
         """Scan the network and return device information."""
-        self.nm.scan(hosts=self.ip_range, arguments='-sn')
+        # Decide whether to use privileged mode or not
+        privileged = self.config_entry.options.get(CONF_PRIVILEGED, False)
+
+        if privileged:
+            scan_args = "--privileged -sn"
+        else:
+            scan_args = "-sn"
+
+        self.nm.scan(hosts=self.ip_range, arguments=scan_args)
         devices = []
 
         for host in self.nm.all_hosts():
