@@ -1,8 +1,9 @@
+"""The main sensor entity for the network scanner."""
 import logging
 import nmap
 from datetime import timedelta
 from homeassistant.helpers.entity import Entity
-from .const import DOMAIN
+from .const import DOMAIN, EVENT_SCAN_STARTED, EVENT_SCAN_COMPLETED, CONF_PRIVILEGED
 
 SCAN_INTERVAL = timedelta(minutes=15)
 
@@ -29,6 +30,20 @@ class NetworkScanner(Entity):
             _LOGGER.error("Failed to initialize Nmap scanner: %s", str(e))
             raise
 
+        # Add this entity to the domain's entity list for service handling
+        if DOMAIN not in hass.data:
+            hass.data[DOMAIN] = {}
+        if "entities" not in hass.data[DOMAIN]:
+            hass.data[DOMAIN]["entities"] = []
+        hass.data[DOMAIN]["entities"].append(self)
+
+    async def async_will_remove_from_hass(self):
+        """Run when entity will be removed from hass."""
+        # Remove this entity from the domain's entity list
+        if DOMAIN in self.hass.data and "entities" in self.hass.data[DOMAIN]:
+            if self in self.hass.data[DOMAIN]["entities"]:
+                self.hass.data[DOMAIN]["entities"].remove(self)
+
     @property
     def should_poll(self):
         return True
@@ -53,6 +68,11 @@ class NetworkScanner(Entity):
         """Fetch new state data for the sensor."""
         try:
             _LOGGER.debug("Starting network scan for range: %s", self.ip_range)
+            
+            # Fire scan started event
+            self.hass.bus.async_fire(EVENT_SCAN_STARTED)
+            
+            # Perform the scan
             devices = await self.hass.async_add_executor_job(self.scan_network)
             self._state = len(devices)
             
@@ -69,9 +89,14 @@ class NetworkScanner(Entity):
             
             self._attr_extra_state_attributes = {"devices": devices}
             
+            # Fire scan completed event
+            self.hass.bus.async_fire(EVENT_SCAN_COMPLETED)
+            
         except Exception as e:
             _LOGGER.error("Error during network scan update: %s", str(e))
             _LOGGER.exception("Full traceback:")
+            # Fire scan completed event even on error
+            self.hass.bus.async_fire(EVENT_SCAN_COMPLETED)
 
     def parse_mac_mapping(self, mapping_string):
         """Parse the MAC mapping string into a dictionary."""
@@ -154,7 +179,7 @@ class NetworkScanner(Entity):
         _LOGGER.debug("Starting network scan with Nmap")
         
         try:
-            privileged = False
+            privileged = self.hass.data[DOMAIN].get(CONF_PRIVILEGED, False)
             scan_args = "--privileged -sn -PR" if privileged else "-sn -PR"
             _LOGGER.debug("Nmap scan arguments: %s", scan_args)
 
