@@ -1,118 +1,112 @@
-"""Config flow for Network Scanner."""
+"""The Network Scanner integration."""
+from __future__ import annotations
+
 import logging
 import voluptuous as vol
-from typing import Any, Dict, Optional
 
-from homeassistant import config_entries
-from homeassistant.core import callback
-from homeassistant.data_entry_flow import FlowResult
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import Platform, ATTR_ENTITY_ID
+from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.typing import ConfigType
 
-from .const import DOMAIN, CONF_PRIVILEGED
+from .const import (
+    DOMAIN,
+    SERVICE_START_SCAN,
+    EVENT_SCAN_STARTED,
+    EVENT_SCAN_COMPLETED,
+)
+
+PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BINARY_SENSOR]
 
 _LOGGER = logging.getLogger(__name__)
 
+SERVICE_SCHEMA = vol.Schema({
+    vol.Optional(ATTR_ENTITY_ID): cv.entity_id,
+})
 
-class NetworkScannerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Handle a config flow for Network Scanner."""
+CONFIG_SCHEMA = vol.Schema(
+    {
+        DOMAIN: vol.Schema({
+            vol.Optional("ip_range"): cv.string,
+        })
+    },
+    extra=vol.ALLOW_EXTRA,
+)
 
-    VERSION = 1
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Set up the Network Scanner component."""
+    _LOGGER.debug("Setting up Network Scanner integration")
+    hass.data.setdefault(DOMAIN, {})
 
-    async def async_step_user(self, user_input: Optional[Dict[str, Any]] = None) -> FlowResult:
-        """Handle the initial step."""
-        errors: Dict[str, str] = {}
+    if DOMAIN in config:
+        hass.data[DOMAIN].update(config[DOMAIN])
 
-        if self._async_current_entries():
-            return self.async_abort(reason="single_instance_allowed")
+    return True
 
-        if user_input is not None:
-            # Validate and create entry
-            try:
-                # Clean up the input by removing empty MAC mappings
-                cleaned_input = {k: v for k, v in user_input.items() if v not in (None, "")}
-                return self.async_create_entry(
-                    title="Network Scanner",
-                    data=cleaned_input
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Set up Network Scanner from a config entry."""
+    _LOGGER.debug("Setting up Network Scanner config entry")
+    
+    hass.data.setdefault(DOMAIN, {})
+    hass.data[DOMAIN][entry.entry_id] = {}
+    hass.data[DOMAIN]["entities"] = []
+
+    async def handle_start_scan(call: ServiceCall) -> None:
+        """Handle the manual scan service call."""
+        try:
+            entity_id = call.data.get(ATTR_ENTITY_ID)
+            hass.bus.async_fire(EVENT_SCAN_STARTED)
+            
+            if entity_id:
+                await hass.services.async_call(
+                    "homeassistant",
+                    "update_entity",
+                    {ATTR_ENTITY_ID: entity_id}
                 )
-            except Exception as err:  # pylint: disable=broad-except
-                _LOGGER.error("Unexpected exception: %s", err)
-                errors["base"] = "unknown"
+            else:
+                entities = hass.data[DOMAIN].get("entities", [])
+                for entity in entities:
+                    await entity.async_update()
+                    
+            hass.bus.async_fire(EVENT_SCAN_COMPLETED)
+            
+        except Exception as err:
+            _LOGGER.error("Error during manual scan: %s", str(err))
+            hass.bus.async_fire(EVENT_SCAN_COMPLETED)
 
-        # Prepare the schema
-        data_schema = {
-            vol.Required("ip_range", default="192.168.1.0/24"): str,
-            vol.Optional(CONF_PRIVILEGED, default=False): bool,
-        }
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_START_SCAN,
+        handle_start_scan,
+        schema=SERVICE_SCHEMA,
+    )
 
-        # Add MAC mapping fields
-        for i in range(1, 26):  # Start with 25 mapping fields
-            data_schema[vol.Optional(f"mac_mapping_{i}", default="")] = str
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-        return self.async_show_form(
-            step_id="user",
-            data_schema=vol.Schema(data_schema),
-            errors=errors,
-        )
+    entry.async_on_unload(
+        entry.add_update_listener(async_reload_entry)
+    )
 
-    @staticmethod
-    @callback
-    def async_get_options_flow(
-        config_entry: config_entries.ConfigEntry,
-    ) -> config_entries.OptionsFlow:
-        """Create the options flow."""
-        return OptionsFlowHandler(config_entry)
+    return True
 
-
-class OptionsFlowHandler(config_entries.OptionsFlow):
-    """Handle options flow for the Network Scanner integration."""
-
-    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        """Initialize options flow."""
-        self.config_entry = config_entry
-
-    async def async_step_init(
-        self, user_input: Optional[Dict[str, Any]] = None
-    ) -> FlowResult:
-        """Manage options."""
-        errors: Dict[str, str] = {}
-
-        if user_input is not None:
-            # Clean up the input by removing empty MAC mappings
-            cleaned_input = {k: v for k, v in user_input.items() if v not in (None, "")}
-            return self.async_create_entry(title="", data=cleaned_input)
-
-        # Prepare schema with current values
-        options_schema = {
-            vol.Required(
-                "ip_range",
-                default=self.config_entry.data.get("ip_range", "192.168.1.0/24")
-            ): str,
-            vol.Optional(
-                CONF_PRIVILEGED,
-                default=self.config_entry.data.get(CONF_PRIVILEGED, False)
-            ): bool,
-        }
-
-        # Add MAC mapping fields with current values
-        current_mappings = {
-            k: v for k, v in self.config_entry.data.items()
-            if k.startswith("mac_mapping_")
-        }
-
-        # Add existing mappings
-        for key, value in current_mappings.items():
-            options_schema[vol.Optional(key, default=value)] = str
-
-        # Add a few extra empty mapping fields
-        max_mapping = max(
-            [int(k.split("_")[2]) for k in current_mappings.keys()]
-            if current_mappings else [0]
-        )
+async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Unload a config entry."""
+    _LOGGER.debug("Unloading Network Scanner config entry")
+    
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    
+    if unload_ok:
+        hass.data[DOMAIN].pop(entry.entry_id, None)
+        if "entities" in hass.data[DOMAIN]:
+            hass.data[DOMAIN].pop("entities")
         
-        for i in range(max_mapping + 1, max_mapping + 6):
-            options_schema[vol.Optional(f"mac_mapping_{i}", default="")] = str
+        if not hass.data[DOMAIN]:
+            hass.data.pop(DOMAIN)
 
-        return self.async_show_form(
-            step_id="init",
-            data_schema=vol.Schema(options_schema),
-            errors=errors,
-        )
+    return unload_ok
+
+async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Reload config entry."""
+    await async_unload_entry(hass, entry)
+    await async_setup_entry(hass, entry)
