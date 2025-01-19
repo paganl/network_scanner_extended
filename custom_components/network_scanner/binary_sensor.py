@@ -1,69 +1,82 @@
 """Binary sensor for the 'new devices' detection in a network scanner integration."""
 import logging
-import nmap
-
 from homeassistant.components.binary_sensor import BinarySensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.storage import Store
+from homeassistant.helpers.entity_registry import async_get as async_get_entity_registry
+from homeassistant.const import STATE_UNKNOWN
 
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
-
+STORAGE_VERSION = 1
+STORAGE_KEY = f"{DOMAIN}_known_devices"
 
 async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry, async_add_entities):
     """Set up the new device detection binary sensor from a config entry."""
-    # 1) Extract IP range
     ip_range = config_entry.data.get("ip_range", "192.168.1.0/24")
     _LOGGER.debug("NewDeviceBinarySensor: using ip_range: %s", ip_range)
 
-    # 2) Gather mac_mappings lines from the config entry
-    mac_mappings_list = []
-    # Ensure we handle at least 25 lines, then keep going if there are more
-    for i in range(25):
-        key = f"mac_mapping_{i+1}"
-        mac_line = config_entry.data.get(key, "")
-        mac_mappings_list.append(mac_line)
-
-    i = 25
-    while True:
-        key = f"mac_mapping_{i+1}"
-        if key in config_entry.data:
-            mac_line = config_entry.data.get(key, "")
-            mac_mappings_list.append(mac_line)
-            i += 1
-        else:
+    # Find the main sensor's entity ID
+    entity_registry = async_get_entity_registry(hass)
+    main_sensor_unique_id = f"network_scanner_{ip_range}"
+    
+    main_sensor_entity_id = None
+    for entity in entity_registry.entities.values():
+        if entity.unique_id == main_sensor_unique_id:
+            main_sensor_entity_id = entity.entity_id
             break
 
-    # 3) Combine into a single string to parse
-    mac_mappings = "\n".join(mac_mappings_list)
-    _LOGGER.debug("NewDeviceBinarySensor: gathered mac_mappings:\n%s", mac_mappings)
+    if not main_sensor_entity_id:
+        _LOGGER.error("Could not find main network scanner sensor")
+        return
 
-    # 4) Create and add the binary sensor entity
-    sensor = NewDeviceBinarySensor(hass, ip_range, mac_mappings)
+    sensor = NewDeviceBinarySensor(hass, ip_range, main_sensor_entity_id)
     async_add_entities([sensor], True)
 
 
 class NewDeviceBinarySensor(BinarySensorEntity):
     """Binary sensor that reports True if any brand new device is detected on the network."""
 
-    def __init__(self, hass, ip_range, mac_mapping):
+    def __init__(self, hass, ip_range, main_sensor_entity_id):
         """Initialize the binary sensor."""
         self.hass = hass
         self.ip_range = ip_range
-        self.mac_mapping = self.parse_mac_mapping(mac_mapping)
-
-        # We'll use nmap PortScanner just like the main sensor
-        self.nm = nmap.PortScanner()
-
-        # Keep a set of devices we have already seen (MAC or IP fallback)
+        self.main_sensor_entity_id = main_sensor_entity_id
+        
+        # Initialize storage for known devices
+        self._store = Store(self.hass, STORAGE_VERSION, STORAGE_KEY)
         self._known_devices = set()
-
-        # The sensor state (True if new device found in the most recent scan)
+        
+        # State variables
         self._is_on = False
-
-        # We can store which devices were newly discovered *this* cycle
         self._newly_found_this_cycle = {"new_devices": []}
+        
+    async def async_added_to_hass(self):
+        """Run when entity about to be added to hass."""
+        await super().async_added_to_hass()
+        
+        # Load known devices from storage
+        try:
+            stored_data = await self._store.async_load()
+            if stored_data is not None:
+                self._known_devices = set(stored_data.get("devices", []))
+                _LOGGER.debug("Loaded %d known devices from storage", len(self._known_devices))
+        except Exception as exc:
+            _LOGGER.error("Error loading known devices from storage: %s", exc)
+            self._known_devices = set()
+
+    async def _save_known_devices(self):
+        """Save known devices to persistent storage."""
+        try:
+            data = {
+                "devices": list(self._known_devices)
+            }
+            await self._store.async_save(data)
+            _LOGGER.debug("Saved %d known devices to storage", len(self._known_devices))
+        except Exception as exc:
+            _LOGGER.error("Error saving known devices to storage: %s", exc)
 
     @property
     def name(self):
@@ -77,69 +90,64 @@ class NewDeviceBinarySensor(BinarySensorEntity):
 
     @property
     def should_poll(self):
-        """Home Assistant should periodically poll this sensor."""
+        """Entity should be polled."""
         return True
 
     @property
     def is_on(self):
-        """Return True if we found any new devices during the last scan."""
+        """Return True if new devices were found."""
         return self._is_on
 
     @property
     def extra_state_attributes(self):
-        """Return any extra attributes, e.g. which devices are new."""
+        """Return extra state attributes."""
         return self._newly_found_this_cycle
 
     async def async_update(self):
-        """Periodically run a network scan and detect new devices."""
+        """Update the state using data from the main sensor."""
         try:
-            _LOGGER.debug("NewDeviceBinarySensor: scanning network...")
-            current_devices = await self.hass.async_add_executor_job(self.scan_network)
+            # Get state from main sensor
+            state = self.hass.states.get(self.main_sensor_entity_id)
+            if state is None or state.state == STATE_UNKNOWN:
+                _LOGGER.warning("Main sensor state not available")
+                return
 
-            # Reset for each scan
+            # Get the devices list from the main sensor's attributes
+            if not state.attributes or "devices" not in state.attributes:
+                _LOGGER.warning("No devices data in main sensor attributes")
+                return
+
+            # Reset state for this cycle
             self._is_on = False
             self._newly_found_this_cycle = {"new_devices": []}
 
-            for dev_id in current_devices:
-                # If we haven't seen this ID yet, it's new
-                if dev_id not in self._known_devices:
+            # Process each device from the main sensor
+            devices = state.attributes["devices"]
+            for device in devices:
+                # Get device identifier (prefer MAC over IP)
+                device_id = device.get("mac")
+                if not device_id:
+                    device_id = f"ip_{device.get('ip')}"
+                
+                if device_id and device_id not in self._known_devices:
                     self._is_on = True
-                    self._newly_found_this_cycle["new_devices"].append(dev_id)
-                    self._known_devices.add(dev_id)
+                    self._newly_found_this_cycle["new_devices"].append({
+                        "id": device_id,
+                        "ip": device.get("ip"),
+                        "name": device.get("name", "Unknown"),
+                        "type": device.get("type", "Unknown"),
+                        "vendor": device.get("vendor", "Unknown")
+                    })
+                    self._known_devices.add(device_id)
+                    _LOGGER.info("Found new device: %s (%s)", 
+                               device.get("name", "Unknown"), device_id)
 
+            # If we found new devices, save the updated list
             if self._is_on:
-                _LOGGER.info("NewDeviceBinarySensor: Found new devices: %s", self._newly_found_this_cycle["new_devices"])
+                _LOGGER.info("NewDeviceBinarySensor: Found new devices: %s", 
+                           self._newly_found_this_cycle["new_devices"])
+                await self._save_known_devices()
 
         except Exception as exc:
-            _LOGGER.error("Error scanning for new devices: %s", exc)
-
-    def parse_mac_mapping(self, mapping_string):
-        """Parse the MAC mapping string (optional for more advanced usage)."""
-        # You could do more with this if you want vendor/device name lookups.
-        mapping = {}
-        for line in mapping_string.split("\n"):
-            parts = line.split(";")
-            if len(parts) >= 3:
-                mac = parts[0].lower()
-                # name, device_type = parts[1], parts[2], etc.
-                mapping[mac] = (parts[1], parts[2])
-        return mapping
-
-    def scan_network(self):
-        """Scan the network and return a list of IDs (MAC or IP) for all hosts found."""
-        # Adjust if you have a 'privileged' mode in your config
-        scan_args = "-sn"
-        self.nm.scan(hosts=self.ip_range, arguments=scan_args)
-
-        found_ids = []
-
-        for host in self.nm.all_hosts():
-            addresses = self.nm[host].get("addresses", {})
-            ip = addresses.get("ipv4", host)
-            mac = addresses.get("mac")
-
-            # Use MAC if present, else fallback to IP
-            dev_id = mac if mac else ip
-            found_ids.append(dev_id)
-
-        return found_ids
+            _LOGGER.error("Error updating new device sensor: %s", exc)
+    
