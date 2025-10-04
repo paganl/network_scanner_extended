@@ -187,3 +187,75 @@ class NetworkScannerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             title="Network Scanner Extended",
             data=entry_data,
         )
+
+# ---- Options Flow ----
+from typing import Any, Dict
+
+class NetworkScannerOptionsFlow(config_entries.OptionsFlow):
+    """Options UI to edit settings after setup."""
+
+    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
+        self.config_entry = config_entry
+
+    async def async_step_init(self, user_input: Dict[str, Any] | None = None):
+        # Entry point; show the same form as 'user'
+        return await self.async_step_user(user_input)
+
+    async def async_step_user(self, user_input: Dict[str, Any] | None = None):
+        errors: dict[str, str] = {}
+
+        # Defaults prefer options (if previously saved), then fall back to data
+        data = self.config_entry.data or {}
+        opts = self.config_entry.options or {}
+
+        cur_ip_range = opts.get("ip_range", data.get("ip_range", "192.168.1.0/24"))
+        cur_json_text = opts.get("mac_directory_json_text", "")
+        cur_json_url = opts.get("mac_directory_json_url", data.get("mac_directory_json_url", ""))
+
+        schema = vol.Schema({
+            vol.Required("ip_range", description={"suggested_value": cur_ip_range}): str,
+            vol.Optional("mac_directory_json_text",
+                         description={"suggested_value": cur_json_text}): TextSelector(),
+            vol.Optional("mac_directory_json_url",
+                         description={"suggested_value": cur_json_url}): str,
+        })
+
+        if user_input is None:
+            return self.async_show_form(step_id="user", data_schema=schema, errors=errors)
+
+        # Validate IP/CIDR
+        ipr = (user_input.get("ip_range") or "").strip()
+        from ipaddress import ip_network
+        try:
+            ip_network(ipr, strict=False)
+        except Exception:
+            errors["ip_range"] = "invalid_ip_range"
+
+        # Lightly validate JSON text (don’t store parsed dict in options)
+        jtxt = (user_input.get("mac_directory_json_text") or "").strip()
+        if jtxt:
+            try:
+                parsed = json.loads(jtxt)
+                block = parsed.get("data", parsed) if isinstance(parsed, dict) else {}
+                if not isinstance(block, dict):
+                    errors["mac_directory_json_text"] = "invalid_json"
+            except Exception:
+                errors["mac_directory_json_text"] = "invalid_json"
+
+        jurl = (user_input.get("mac_directory_json_url") or "").strip()
+
+        if errors:
+            return self.async_show_form(step_id="user", data_schema=schema, errors=errors)
+
+        # Save OPTIONS only. (Your setup uses entry.data; options override at runtime.)
+        new_options = {
+            "ip_range": ipr,
+            "mac_directory_json_text": jtxt,
+            "mac_directory_json_url": jurl,
+        }
+        return self.async_create_entry(title="", data=new_options)
+
+
+async def async_get_options_flow(config_entry: config_entries.ConfigEntry):
+    """Tell HA how to get the options flow."""
+    return NetworkScannerOptionsFlow(config_entry)
