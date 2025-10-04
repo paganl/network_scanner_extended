@@ -1,18 +1,35 @@
-from .sensor import NetworkScanner
+from __future__ import annotations
+
+from homeassistant.core import HomeAssistant
+from homeassistant.config_entries import ConfigEntry
+
 from .const import DOMAIN
 
-async def async_setup(hass, config):
-    """Set up the Network Scanner component."""
-    # Store YAML configuration in hass.data
-    hass.data[DOMAIN] = config.get(DOMAIN, {})
+PLATFORMS: list[str] = ["sensor"]
+
+
+async def async_setup(hass: HomeAssistant, config: dict) -> bool:
+    """Set up Network Scanner (store YAML defaults for the config flow)."""
+    # Keep any YAML under hass.data[DOMAIN] so config_flow can read suggested values
+    hass.data.setdefault(DOMAIN, config.get(DOMAIN, {}) or {})
     return True
 
-async def async_setup_entry(hass, config_entry):
+
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Network Scanner from a config entry."""
-    await hass.config_entries.async_forward_entry_setups(config_entry, ["sensor"])
+    # Reload automatically when options change (enables 'Configure' button behaviour)
+    entry.async_on_unload(entry.add_update_listener(_async_update_listener))
+
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
-async def async_unload_entry(hass, config_entry):
+
+async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Handle options updates by reloading the entry."""
+    await hass.config_entries.async_reload(entry.entry_id)
+
+
+async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
-    await hass.config_entries.async_forward_entry_unload(config_entry, "sensor")
-    return True
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    return unload_ok
