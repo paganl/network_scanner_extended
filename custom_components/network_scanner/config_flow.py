@@ -17,7 +17,7 @@ except Exception:  # pragma: no cover
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
-
+_LOGGER.warning("network_scanner: config_flow module imported")
 
 def _format_for_log(d: dict) -> dict:
     return {k: str(v) for k, v in d.items()}
