@@ -269,4 +269,5 @@ class NetworkScannerOptionsFlow(config_entries.OptionsFlow):
 
 async def async_get_options_flow(config_entry: config_entries.ConfigEntry):
     """Tell HA how to get the options flow."""
+    _LOGGER.warning("network_scanner: options flow factory called for %s", config_entry.entry_id)
     return NetworkScannerOptionsFlow(config_entry)
