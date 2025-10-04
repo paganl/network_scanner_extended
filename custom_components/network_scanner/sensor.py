@@ -189,4 +189,4 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry, asyn
         return
 
     _LOGGER.debug("Setting up Network Scanner Extended for %s", ip_range)
-    async_add_entities([NetworkScanner(hass, config_entry)], True)
+    async_add_entities([NetworkScanner(hass, config_entry)], False)
