@@ -1,6 +1,6 @@
 {
   "domain": "network_scanner",
-  "name": "Network Scanner",
+  "name": "Network Scanner Extended",
   "codeowners": ["@paganl"],
   "config_flow": true,
   "dependencies": [],
