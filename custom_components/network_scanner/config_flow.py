@@ -8,7 +8,6 @@ from homeassistant import config_entries
 # Selector fallback for older HA cores
 try:
     from homeassistant.helpers.selector import selector as ha_selector
-
     def TextSelector():
         return ha_selector({"text": {"multiline": True}})
 except Exception:  # pragma: no cover
@@ -188,7 +187,8 @@ class NetworkScannerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data=entry_data,
         )
 
-# ---- Options Flow ----
+
+# ---- Options Flow (single, clean definition) ----
 from typing import Any, Dict
 
 class NetworkScannerOptionsFlow(config_entries.OptionsFlow):
@@ -210,22 +210,33 @@ class NetworkScannerOptionsFlow(config_entries.OptionsFlow):
 
         cur_ip_range = opts.get("ip_range", data.get("ip_range", "192.168.1.0/24"))
         cur_json_text = opts.get("mac_directory_json_text", "")
-        cur_json_url = opts.get("mac_directory_json_url", data.get("mac_directory_json_url", ""))
+        cur_json_url = opts.get(
+            "mac_directory_json_url", data.get("mac_directory_json_url", "")
+        )
 
-        schema = vol.Schema({
-            vol.Required("ip_range", description={"suggested_value": cur_ip_range}): str,
-            vol.Optional("mac_directory_json_text",
-                         description={"suggested_value": cur_json_text}): TextSelector(),
-            vol.Optional("mac_directory_json_url",
-                         description={"suggested_value": cur_json_url}): str,
-        })
+        schema = vol.Schema(
+            {
+                vol.Required(
+                    "ip_range", description={"suggested_value": cur_ip_range}
+                ): str,
+                vol.Optional(
+                    "mac_directory_json_text",
+                    description={"suggested_value": cur_json_text},
+                ): TextSelector(),
+                vol.Optional(
+                    "mac_directory_json_url",
+                    description={"suggested_value": cur_json_url},
+                ): str,
+            }
+        )
 
         if user_input is None:
-            return self.async_show_form(step_id="user", data_schema=schema, errors=errors)
+            return self.async_show_form(
+                step_id="user", data_schema=schema, errors=errors
+            )
 
         # Validate IP/CIDR
         ipr = (user_input.get("ip_range") or "").strip()
-        from ipaddress import ip_network
         try:
             ip_network(ipr, strict=False)
         except Exception:
@@ -258,80 +269,4 @@ class NetworkScannerOptionsFlow(config_entries.OptionsFlow):
 
 async def async_get_options_flow(config_entry: config_entries.ConfigEntry):
     """Tell HA how to get the options flow."""
-    return NetworkScannerOptionsFlow(config_entry)
-
-# at top of file
-from homeassistant import config_entries
-import voluptuous as vol
-import json
-
-# … your existing ConfigFlow code …
-
-# ---- Options Flow (add this block) ----
-from typing import Any, Dict
-
-class NetworkScannerOptionsFlow(config_entries.OptionsFlow):
-    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        self.config_entry = config_entry
-
-    async def async_step_init(self, user_input: Dict[str, Any] | None = None):
-        return await self.async_step_user(user_input)
-
-    async def async_step_user(self, user_input: Dict[str, Any] | None = None):
-        errors: dict[str, str] = {}
-
-        data = self.config_entry.data or {}
-        opts = self.config_entry.options or {}
-
-        cur_ip_range = opts.get("ip_range", data.get("ip_range", "192.168.1.0/24"))
-        cur_json_text = opts.get("mac_directory_json_text", "")
-        cur_json_url  = opts.get("mac_directory_json_url", data.get("mac_directory_json_url",""))
-
-        # Reuse your TextSelector() helper; if you don’t have it, just use str
-        try:
-            from homeassistant.helpers.selector import selector as ha_selector
-            TextSelector = lambda: ha_selector({"text": {"multiline": True}})
-        except Exception:
-            TextSelector = lambda: str
-
-        schema = vol.Schema({
-            vol.Required("ip_range", description={"suggested_value": cur_ip_range}): str,
-            vol.Optional("mac_directory_json_text", description={"suggested_value": cur_json_text}): TextSelector(),
-            vol.Optional("mac_directory_json_url",  description={"suggested_value": cur_json_url}): str,
-        })
-
-        if user_input is None:
-            return self.async_show_form(step_id="user", data_schema=schema, errors=errors)
-
-        # Minimal validation (match your ConfigFlow)
-        from ipaddress import ip_network
-        ipr = (user_input.get("ip_range") or "").strip()
-        try:
-            ip_network(ipr, strict=False)
-        except Exception:
-            errors["ip_range"] = "invalid_ip_range"
-
-        txt = (user_input.get("mac_directory_json_text") or "").strip()
-        if txt:
-            try:
-                parsed = json.loads(txt)
-                block = parsed.get("data", parsed) if isinstance(parsed, dict) else {}
-                if not isinstance(block, dict):
-                    errors["mac_directory_json_text"] = "invalid_json"
-            except Exception:
-                errors["mac_directory_json_text"] = "invalid_json"
-
-        url = (user_input.get("mac_directory_json_url") or "").strip()
-
-        if errors:
-            return self.async_show_form(step_id="user", data_schema=schema, errors=errors)
-
-        return self.async_create_entry(title="", data={
-            "ip_range": ipr,
-            "mac_directory_json_text": txt,
-            "mac_directory_json_url": url,
-        })
-
-# Tell HA how to get the options flow
-async def async_get_options_flow(config_entry: config_entries.ConfigEntry):
     return NetworkScannerOptionsFlow(config_entry)
