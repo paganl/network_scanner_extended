@@ -1,5 +1,5 @@
 {
-  "domain": "network_scanner_extended",
+  "domain": "network_scanner",
   "name": "Network Scanner",
   "codeowners": ["@paganl"],
   "config_flow": true,
@@ -8,5 +8,7 @@
   "iot_class": "local_polling",
   "issue_tracker": "https://github.com/paganl/network_scanner_extended/issues",
   "requirements": ["python-nmap"],
-  "version": "1.1.7"
+  "version": "0.4.0"
+  "integration_type": hub
+  "iot_class": "local_polling"
 }
