@@ -260,12 +260,12 @@ class NetworkScannerOptionsFlow(config_entries.OptionsFlow):
 
         # Save OPTIONS only. (Your setup uses entry.data; options override at runtime.)
         new_options = {
-            "ip_range": ipr,
+            "ip_range": ipr
             "mac_directory_json_text": jtxt,
             "mac_directory_json_url": jurl,
         }
         return self.async_create_entry(title="", data=new_options)
 
 
-        async def async_get_options_flow(config_entry: config_entries.ConfigEntry):
-            return NetworkScannerOptionsFlow(config_entry)
+    async def async_get_options_flow(config_entry: config_entries.ConfigEntry):
+        return NetworkScannerOptionsFlow(config_entry)
