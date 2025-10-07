@@ -17,7 +17,10 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     controller = ScanController(hass, entry)
-    hass.data[DOMAIN][entry.entry_id] = {"controller": controller}
+    hass.data[DOMAIN][entry.entry_id] = {
+        "controller": controller,
+        "entry": entry,
+    }
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
