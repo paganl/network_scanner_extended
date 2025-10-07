@@ -1,17 +1,19 @@
+# custom_components/network_scanner_extended/config_flow.py
 from __future__ import annotations
 import json
 import logging
+import re
 from ipaddress import ip_network
-import voluptuous as vol
 from typing import Any, Dict
 
+import voluptuous as vol
 from homeassistant import config_entries
 
 try:
     from homeassistant.helpers.selector import selector as ha_selector
     def TextSelector():
         return ha_selector({"text": {"multiline": True}})
-except Exception:
+except Exception:  # fallback on very old cores
     def TextSelector():
         return str
 
@@ -21,29 +23,51 @@ _LOGGER = logging.getLogger(__name__)
 
 DEFAULT_NMAP_ARGS = "-sn -PE -PS22,80,443 -PA80,443 -PU53 -T4"
 
+def _split_cidrs(s: str) -> list[str]:
+    # allow comma and/or whitespace separated
+    return [p.strip() for p in re.split(r"[,\s]+", s or "") if p.strip()]
+
 def _normalise_mac_key(mac: str) -> str:
     return mac.upper() if isinstance(mac, str) else ""
 
 class NetworkScannerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
 
-    async def async_step_user(self, user_input=None):
+    async def async_step_user(self, user_input: Dict[str, Any] | None = None):
         yaml_defaults = self.hass.data.get(DOMAIN, {}) or {}
         schema = vol.Schema({
-            vol.Required("ip_range", description={"suggested_value": yaml_defaults.get("ip_range", DEFAULT_IP_RANGE)}): str,
-            vol.Optional("nmap_args", description={"suggested_value": DEFAULT_NMAP_ARGS}): str,
-            vol.Optional("mac_directory_json_text", description={"suggested_value": ""}): TextSelector(),
-            vol.Optional("mac_directory_json_url", description={"suggested_value": ""}): str,
+            vol.Required(
+                "ip_range",
+                description={"suggested_value": yaml_defaults.get("ip_range", DEFAULT_IP_RANGE)},
+            ): str,
+            vol.Optional(
+                "nmap_args",
+                description={"suggested_value": DEFAULT_NMAP_ARGS},
+            ): str,
+            vol.Optional(
+                "mac_directory_json_text",
+                description={"suggested_value": ""},
+            ): TextSelector(),
+            vol.Optional(
+                "mac_directory_json_url",
+                description={"suggested_value": ""},
+            ): str,
         })
 
         if user_input is None:
             return self.async_show_form(step_id="user", data_schema=schema, errors={})
 
         errors: Dict[str, str] = {}
+
+        # Validate multi-CIDR
         ipr = (user_input.get("ip_range") or "").strip()
-        try:
-            ip_network(ipr, strict=False)
-        except Exception:
+        bad = []
+        for cidr in _split_cidrs(ipr):
+            try:
+                ip_network(cidr, strict=False)
+            except Exception:
+                bad.append(cidr)
+        if not ipr or bad:
             errors["ip_range"] = "invalid_ip_range"
 
         # Light validation of JSON text
@@ -60,7 +84,7 @@ class NetworkScannerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return self.async_show_form(step_id="user", data_schema=schema, errors=errors)
 
         # Normalise directory now so the sensor can use it directly
-        directory = {}
+        directory: Dict[str, Dict[str, str]] = {}
         if jtxt:
             raw = json.loads(jtxt)
             block = raw.get("data", raw) if isinstance(raw, dict) else {}
@@ -75,17 +99,15 @@ class NetworkScannerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         directory[mk] = {"name": str(v), "desc": ""}
 
         data = {
-            "ip_range": ipr,
+            "ip_range": ipr,  # raw multi-CIDR string
             "mac_directory": directory,
             "mac_directory_json_url": (user_input.get("mac_directory_json_url") or "").strip(),
+            "nmap_args": (user_input.get("nmap_args") or DEFAULT_NMAP_ARGS).strip(),
         }
         return self.async_create_entry(title="Network Scanner Extended", data=data)
 
-    # Options flow mirrors the same fields
+    # HA will not call these on the ConfigFlow; real options live below.
     async def async_step_init(self, user_input=None):
-        return await self.async_step_user(user_input)
-
-    async def async_step_options(self, user_input=None):
         return await self.async_step_user(user_input)
 
 class NetworkScannerOptionsFlow(config_entries.OptionsFlow):
@@ -95,25 +117,43 @@ class NetworkScannerOptionsFlow(config_entries.OptionsFlow):
     async def async_step_init(self, user_input=None):
         return await self.async_step_user(user_input)
 
-    async def async_step_user(self, user_input=None):
+    async def async_step_user(self, user_input: Dict[str, Any] | None = None):
         data = self.entry.data or {}
         opts = self.entry.options or {}
 
         schema = vol.Schema({
-            vol.Required("ip_range", description={"suggested_value": opts.get("ip_range", data.get("ip_range", DEFAULT_IP_RANGE))}): str,
-            vol.Optional("nmap_args", description={"suggested_value": DEFAULT_NMAP_ARGS}): str,
-            vol.Optional("mac_directory_json_text", description={"suggested_value": opts.get("mac_directory_json_text", "")}): TextSelector(),
-            vol.Optional("mac_directory_json_url", description={"suggested_value": opts.get("mac_directory_json_url", data.get("mac_directory_json_url",""))}): str,
+            vol.Required(
+                "ip_range",
+                description={"suggested_value": opts.get("ip_range", data.get("ip_range", DEFAULT_IP_RANGE))},
+            ): str,
+            vol.Optional(
+                "nmap_args",
+                description={"suggested_value": opts.get("nmap_args", data.get("nmap_args", DEFAULT_NMAP_ARGS))},
+            ): str,
+            vol.Optional(
+                "mac_directory_json_text",
+                description={"suggested_value": opts.get("mac_directory_json_text", "")},
+            ): TextSelector(),
+            vol.Optional(
+                "mac_directory_json_url",
+                description={"suggested_value": opts.get("mac_directory_json_url", data.get("mac_directory_json_url", ""))},
+            ): str,
         })
 
         if user_input is None:
             return self.async_show_form(step_id="user", data_schema=schema, errors={})
 
-        # Validate similarly
-        errors = {}
-        try:
-            ip_network((user_input.get("ip_range") or "").strip(), strict=False)
-        except Exception:
+        errors: Dict[str, str] = {}
+
+        # Validate multi-CIDR here too
+        ipr = (user_input.get("ip_range") or "").strip()
+        bad = []
+        for cidr in _split_cidrs(ipr):
+            try:
+                ip_network(cidr, strict=False)
+            except Exception:
+                bad.append(cidr)
+        if not ipr or bad:
             errors["ip_range"] = "invalid_ip_range"
 
         jtxt = (user_input.get("mac_directory_json_text") or "").strip()
@@ -130,7 +170,8 @@ class NetworkScannerOptionsFlow(config_entries.OptionsFlow):
             return self.async_show_form(step_id="user", data_schema=schema, errors=errors)
 
         return self.async_create_entry(title="", data={
-            "ip_range": (user_input.get("ip_range") or "").strip(),
+            "ip_range": ipr,
+            "nmap_args": (user_input.get("nmap_args") or DEFAULT_NMAP_ARGS).strip(),
             "mac_directory_json_text": jtxt,
             "mac_directory_json_url": (user_input.get("mac_directory_json_url") or "").strip(),
         })
