@@ -23,7 +23,7 @@ ARP_PROVIDER_OPNSENSE = "opnsense"
 
 DEFAULT_OPNSENSE_URL = "http://10.0.0.2"
 DEFAULT_OPNSENSE_IFACE = ""      # optional (e.g. "lan", "vlan30")
-OPNSENSE_ARP_PATH = "/api/diagnostics/interface/search_arp"
+OPNSENSE_ARP_PATH = "/api/diagnostics/interface/search_arp/"
 
 # Card-friendly status strings
 STATUS_IDLE = "idle"
