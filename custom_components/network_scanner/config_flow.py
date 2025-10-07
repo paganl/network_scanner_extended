@@ -4,6 +4,7 @@ import logging
 import re
 from ipaddress import ip_network
 from typing import Any, Dict
+from .const import DEFAULT_SCAN_INTERVAL
 
 import voluptuous as vol
 from homeassistant import config_entries
@@ -109,7 +110,7 @@ class NetworkScannerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             "mac_directory": directory,
             "mac_directory_json_url": (user_input.get("mac_directory_json_url") or "").strip(),
             "nmap_args": (user_input.get("nmap_args") or DEFAULT_NMAP_ARGS).strip(),
-            "scan_interval": scan_interval,
+            "scan_interval": int(user_input.get("scan_interval", DEFAULT_SCAN_INTERVAL))
         }
         return self.async_create_entry(title="Network Scanner Extended", data=data)
 
@@ -171,7 +172,7 @@ class NetworkScannerOptionsFlow(config_entries.OptionsFlow):
 
         # Validate scan interval
         scan_interval = int(user_input.get("scan_interval") or DEFAULT_SCAN_INTERVAL)
-        if scan_interval < 30 or scan_interval > 3600:
+        if scan_interval < 0 or scan_interval > 3600:
             errors["scan_interval"] = "invalid_scan_interval"
 
         # Validate JSON text
