@@ -22,7 +22,8 @@ _LOGGER = logging.getLogger(__name__)
 def _secs_to_minutes(secs: int | None) -> int:
     if not isinstance(secs, int) or secs < 0:
         return 0
-    return max(0, round(secs / 60))
+    # Return an int; 0 means disabled in minutes UI as well
+    return max(0, int(round(secs / 60)))
 
 def _minutes_to_secs(mins: int | None, default_secs: int) -> int:
     if not isinstance(mins, int) or mins < 0:
@@ -36,28 +37,14 @@ def _split_cidrs(s: str) -> list[str]:
 def _normalise_mac_key(mac: str) -> str:
     return mac.upper() if isinstance(mac, str) else ""
 
-# Selectors (text + number with minutes) when available
+# Multiline text selector when available (safe fallback to str)
 try:
     from homeassistant.helpers.selector import selector as ha_selector
-
     def TextSelector():
         return ha_selector({"text": {"multiline": True}})
-
-    def NumberMinutesSelector(default_val: int):
-        # Render a number input with "min" unit
-        return ha_selector({
-            "number": {
-                "min": 0, "max": 1440, "step": 1, "mode": "box",
-                "unit_of_measurement": "min",
-                "value": default_val,
-            }
-        })
 except Exception:
-    # Fallbacks for very old cores
     def TextSelector():
         return str
-    def NumberMinutesSelector(_default_val: int):
-        return int
 
 # ---------- Config Flow ----------
 
@@ -66,27 +53,31 @@ class NetworkScannerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     async def async_step_user(self, user_input=None):
         yaml_defaults = self.hass.data.get(DOMAIN, {}) or {}
-
-        current_secs = yaml_defaults.get("scan_interval", DEFAULT_SCAN_INTERVAL)
+        current_secs = int(yaml_defaults.get("scan_interval", DEFAULT_SCAN_INTERVAL))
         current_mins = _secs_to_minutes(current_secs)
 
         schema = vol.Schema({
             vol.Required(
                 "ip_range",
-                description={"suggested_value": yaml_defaults.get("ip_range", DEFAULT_IP_RANGE)},
+                default=yaml_defaults.get("ip_range", DEFAULT_IP_RANGE),
             ): str,
             vol.Optional(
                 "nmap_args",
-                description={"suggested_value": DEFAULT_NMAP_ARGS},
+                default=DEFAULT_NMAP_ARGS,
             ): str,
+            # minutes in UI, stored as seconds internally
             vol.Optional(
                 "scan_interval_minutes",
-                description={"suggested_value": current_mins},
-            ): NumberMinutesSelector(current_mins),
-            vol.Optional("mac_directory_json_text",
-                         description={"suggested_value": ""}): TextSelector(),
-            vol.Optional("mac_directory_json_url",
-                         description={"suggested_value": ""}): str,
+                default=current_mins,
+            ): int,
+            vol.Optional(
+                "mac_directory_json_text",
+                description={"suggested_value": ""},
+            ): TextSelector(),
+            vol.Optional(
+                "mac_directory_json_url",
+                default="",
+            ): str,
         })
 
         if user_input is None:
@@ -109,7 +100,7 @@ class NetworkScannerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if bad:
                 errors["ip_range"] = "invalid_ip_range"
 
-        # Validate minutes (0..1440)
+        # Validate minutes (0..1440, where 0 disables auto-scan)
         try:
             mins = int(user_input.get("scan_interval_minutes", current_mins))
         except Exception:
@@ -131,8 +122,8 @@ class NetworkScannerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if errors:
             return self.async_show_form(step_id="user", data_schema=schema, errors=errors)
 
-        # Normalise directory now so the sensor can use it directly
-        directory = {}
+        # Normalise directory now so the sensor/controller can use it directly
+        directory: Dict[str, Dict[str, str]] = {}
         if jtxt:
             raw = json.loads(jtxt)
             block = raw.get("data", raw) if isinstance(raw, dict) else {}
@@ -142,7 +133,10 @@ class NetworkScannerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     if not mk:
                         continue
                     if isinstance(v, dict):
-                        directory[mk] = {"name": str(v.get("name", "")), "desc": str(v.get("desc", ""))}
+                        directory[mk] = {
+                            "name": str(v.get("name", "")),
+                            "desc": str(v.get("desc", "")),
+                        }
                     else:
                         directory[mk] = {"name": str(v), "desc": ""}
 
@@ -150,9 +144,9 @@ class NetworkScannerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         scan_secs = _minutes_to_secs(mins, DEFAULT_SCAN_INTERVAL)
 
         data = {
-            "ip_range": ipr,  # keep raw string e.g. "10.0.0.0/24,10.0.3.0/24"
+            "ip_range": ipr,  # raw string e.g. "10.0.0.0/24,10.0.3.0/24"
             "nmap_args": (user_input.get("nmap_args") or DEFAULT_NMAP_ARGS).strip(),
-            "scan_interval": scan_secs,   # SECONDS
+            "scan_interval": scan_secs,   # SECONDS (0 = disabled)
             "mac_directory": directory,
             "mac_directory_json_url": (user_input.get("mac_directory_json_url") or "").strip(),
         }
@@ -171,29 +165,29 @@ class NetworkScannerOptionsFlow(config_entries.OptionsFlow):
         data = self.entry.data or {}
         opts = self.entry.options or {}
 
-        saved_secs = opts.get("scan_interval", data.get("scan_interval", DEFAULT_SCAN_INTERVAL))
+        saved_secs = int(opts.get("scan_interval", data.get("scan_interval", DEFAULT_SCAN_INTERVAL)))
         saved_mins = _secs_to_minutes(saved_secs)
 
         schema = vol.Schema({
             vol.Required(
                 "ip_range",
-                description={"suggested_value": opts.get("ip_range", data.get("ip_range", DEFAULT_IP_RANGE))},
+                default=opts.get("ip_range", data.get("ip_range", DEFAULT_IP_RANGE)),
             ): str,
             vol.Optional(
                 "nmap_args",
-                description={"suggested_value": opts.get("nmap_args", data.get("nmap_args", DEFAULT_NMAP_ARGS))},
+                default=opts.get("nmap_args", data.get("nmap_args", DEFAULT_NMAP_ARGS)),
             ): str,
             vol.Optional(
                 "scan_interval_minutes",
-                description={"suggested_value": saved_mins},
-            ): NumberMinutesSelector(saved_mins),
+                default=saved_mins,
+            ): int,
             vol.Optional(
                 "mac_directory_json_text",
                 description={"suggested_value": opts.get("mac_directory_json_text", "")},
             ): TextSelector(),
             vol.Optional(
                 "mac_directory_json_url",
-                description={"suggested_value": opts.get("mac_directory_json_url", data.get("mac_directory_json_url", ""))},
+                default=opts.get("mac_directory_json_url", data.get("mac_directory_json_url", "")),
             ): str,
         })
 
@@ -217,7 +211,7 @@ class NetworkScannerOptionsFlow(config_entries.OptionsFlow):
             if bad:
                 errors["ip_range"] = "invalid_ip_range"
 
-        # Validate minutes
+        # Validate minutes 0..1440
         try:
             mins = int(user_input.get("scan_interval_minutes", saved_mins))
         except Exception:
@@ -242,13 +236,16 @@ class NetworkScannerOptionsFlow(config_entries.OptionsFlow):
         # Store seconds in OPTIONS (so Configure overrides take effect)
         scan_secs = _minutes_to_secs(mins, DEFAULT_SCAN_INTERVAL)
 
-        return self.async_create_entry(title="", data={
-            "ip_range": ipr,
-            "nmap_args": (user_input.get("nmap_args") or DEFAULT_NMAP_ARGS).strip(),
-            "scan_interval": scan_secs,  # SECONDS; 0 disables auto-scan
-            "mac_directory_json_text": jtxt,
-            "mac_directory_json_url": (user_input.get("mac_directory_json_url") or "").strip(),
-        })
+        return self.async_create_entry(
+            title="",
+            data={
+                "ip_range": ipr,
+                "nmap_args": (user_input.get("nmap_args") or DEFAULT_NMAP_ARGS).strip(),
+                "scan_interval": scan_secs,  # SECONDS; 0 disables auto-scan
+                "mac_directory_json_text": jtxt,
+                "mac_directory_json_url": (user_input.get("mac_directory_json_url") or "").strip(),
+            },
+        )
 
 async def async_get_options_flow(config_entry: config_entries.ConfigEntry):
     return NetworkScannerOptionsFlow(config_entry)
