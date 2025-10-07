@@ -19,6 +19,9 @@ CONF_ARP_VERIFY_TLS = "arp_verify_tls"
 ARP_PROVIDER_NONE     = "none"
 ARP_PROVIDER_OPNSENSE = "opnsense"
 
+DEFAULT_OPNSENSE_IFACE = ""      # optional (e.g. "lan", "vlan30")
+OPNSENSE_ARP_PATH = "/api/diagnostics/interface/search_arp"
+
 # Card-friendly status strings
 STATUS_IDLE = "idle"
 STATUS_SCANNING = "scanning"
