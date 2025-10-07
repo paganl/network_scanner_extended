@@ -4,6 +4,8 @@ from typing import Dict, Any, Iterable
 import json
 import logging
 
+from .const import DOMAIN
+
 from aiohttp import ClientError, ClientTimeout, BasicAuth
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
