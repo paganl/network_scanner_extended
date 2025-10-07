@@ -1,3 +1,4 @@
+# custom_components/network_scanner_extended/config_flow.py
 from __future__ import annotations
 import json
 import logging
@@ -13,71 +14,81 @@ from .const import (
     DEFAULT_IP_RANGE,
     DEFAULT_SCAN_INTERVAL,   # seconds
     DEFAULT_NMAP_ARGS,
+    # NEW:
+    CONF_ARP_PROVIDER, CONF_ARP_BASE_URL, CONF_ARP_KEY, CONF_ARP_SECRET, CONF_ARP_VERIFY_TLS,
+    ARP_PROVIDER_NONE, ARP_PROVIDER_OPNSENSE,
 )
 
 _LOGGER = logging.getLogger(__name__)
 
-# ---------- helpers ----------
+# Selectors (multiline text, select, password if available)
+try:
+    from homeassistant.helpers.selector import selector as ha_selector
 
-def _secs_to_minutes(secs: int | None) -> int:
-    if not isinstance(secs, int) or secs < 0:
-        return 0
-    # Return an int; 0 means disabled in minutes UI as well
-    return max(0, int(round(secs / 60)))
+    def TextSelector():
+        return ha_selector({"text": {"multiline": True}})
 
-def _minutes_to_secs(mins: int | None, default_secs: int) -> int:
-    if not isinstance(mins, int) or mins < 0:
-        return default_secs
-    return 0 if mins == 0 else mins * 60
+    def SelectProvider(default_val: str):
+        return ha_selector({"select": {
+            "options": [
+                {"label": "None", "value": ARP_PROVIDER_NONE},
+                {"label": "OPNsense", "value": ARP_PROVIDER_OPNSENSE},
+            ],
+            "mode": "dropdown",
+            "translation_key": "arp_provider",
+        }})
+
+    def PasswordSelector():
+        # HA text selector supports type=password
+        return ha_selector({"text": {"type": "password"}})
+
+    def BoolSelector(default: bool):
+        return ha_selector({"boolean": {}})
+except Exception:
+    def TextSelector():
+        return str
+    def SelectProvider(_v: str):
+        return str
+    def PasswordSelector():
+        return str
+    def BoolSelector(_b: bool):
+        return bool
 
 def _split_cidrs(s: str) -> list[str]:
-    # split on commas or whitespace
     return [p.strip() for p in re.split(r"[,\s]+", s or "") if p.strip()]
 
 def _normalise_mac_key(mac: str) -> str:
     return mac.upper() if isinstance(mac, str) else ""
-
-# Multiline text selector when available (safe fallback to str)
-try:
-    from homeassistant.helpers.selector import selector as ha_selector
-    def TextSelector():
-        return ha_selector({"text": {"multiline": True}})
-except Exception:
-    def TextSelector():
-        return str
-
-# ---------- Config Flow ----------
 
 class NetworkScannerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
 
     async def async_step_user(self, user_input=None):
         yaml_defaults = self.hass.data.get(DOMAIN, {}) or {}
-        current_secs = int(yaml_defaults.get("scan_interval", DEFAULT_SCAN_INTERVAL))
-        current_mins = _secs_to_minutes(current_secs)
 
         schema = vol.Schema({
             vol.Required(
                 "ip_range",
-                default=yaml_defaults.get("ip_range", DEFAULT_IP_RANGE),
+                description={"suggested_value": yaml_defaults.get("ip_range", DEFAULT_IP_RANGE)},
             ): str,
             vol.Optional(
                 "nmap_args",
-                default=DEFAULT_NMAP_ARGS,
+                description={"suggested_value": DEFAULT_NMAP_ARGS},
             ): str,
-            # minutes in UI, stored as seconds internally
             vol.Optional(
-                "scan_interval_minutes",
-                default=current_mins,
+                "scan_interval",
+                description={"suggested_value": DEFAULT_SCAN_INTERVAL},  # seconds; 0 disables
             ): int,
-            vol.Optional(
-                "mac_directory_json_text",
-                description={"suggested_value": ""},
-            ): TextSelector(),
-            vol.Optional(
-                "mac_directory_json_url",
-                default="",
-            ): str,
+            # Directory JSON (optional)
+            vol.Optional("mac_directory_json_text", description={"suggested_value": ""}): TextSelector(),
+            vol.Optional("mac_directory_json_url",  description={"suggested_value": ""}): str,
+
+            # NEW: ARP enrichment (optional)
+            vol.Optional(CONF_ARP_PROVIDER, description={"suggested_value": ARP_PROVIDER_NONE}): SelectProvider(ARP_PROVIDER_NONE),
+            vol.Optional(CONF_ARP_BASE_URL, description={"suggested_value": ""}): str,
+            vol.Optional(CONF_ARP_KEY, description={"suggested_value": ""}): str,
+            vol.Optional(CONF_ARP_SECRET, description={"suggested_value": ""}): PasswordSelector(),
+            vol.Optional(CONF_ARP_VERIFY_TLS, description={"suggested_value": True}): BoolSelector(True),
         })
 
         if user_input is None:
@@ -91,22 +102,20 @@ class NetworkScannerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if not cidrs:
             errors["ip_range"] = "invalid_ip_range"
         else:
-            bad = []
             for c in cidrs:
                 try:
                     ip_network(c, strict=False)
                 except Exception:
-                    bad.append(c)
-            if bad:
-                errors["ip_range"] = "invalid_ip_range"
+                    errors["ip_range"] = "invalid_ip_range"
+                    break
 
-        # Validate minutes (0..1440, where 0 disables auto-scan)
+        # Validate scan interval (seconds; allow 0 to disable)
         try:
-            mins = int(user_input.get("scan_interval_minutes", current_mins))
+            scan_interval = int(user_input.get("scan_interval", DEFAULT_SCAN_INTERVAL))
         except Exception:
-            mins = current_mins
-        if mins < 0 or mins > 1440:
-            errors["scan_interval_minutes"] = "invalid_scan_interval"
+            scan_interval = DEFAULT_SCAN_INTERVAL
+        if scan_interval < 0 or scan_interval > 24 * 3600:
+            errors["scan_interval"] = "invalid_scan_interval"
 
         # Light validation of JSON text
         jtxt = (user_input.get("mac_directory_json_text") or "").strip()
@@ -119,10 +128,18 @@ class NetworkScannerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             except Exception:
                 errors["mac_directory_json_text"] = "invalid_json"
 
+        # ARP validation
+        provider = (user_input.get(CONF_ARP_PROVIDER) or ARP_PROVIDER_NONE).strip().lower()
+        if provider == ARP_PROVIDER_OPNSENSE:
+            if not (user_input.get(CONF_ARP_BASE_URL) and user_input.get(CONF_ARP_KEY) and user_input.get(CONF_ARP_SECRET)):
+                errors[CONF_ARP_BASE_URL] = "required"
+                errors[CONF_ARP_KEY] = "required"
+                errors[CONF_ARP_SECRET] = "required"
+
         if errors:
             return self.async_show_form(step_id="user", data_schema=schema, errors=errors)
 
-        # Normalise directory now so the sensor/controller can use it directly
+        # Normalise directory now so the sensor can use it directly
         directory: Dict[str, Dict[str, str]] = {}
         if jtxt:
             raw = json.loads(jtxt)
@@ -133,26 +150,26 @@ class NetworkScannerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     if not mk:
                         continue
                     if isinstance(v, dict):
-                        directory[mk] = {
-                            "name": str(v.get("name", "")),
-                            "desc": str(v.get("desc", "")),
-                        }
+                        directory[mk] = {"name": str(v.get("name", "")), "desc": str(v.get("desc", ""))}
                     else:
                         directory[mk] = {"name": str(v), "desc": ""}
 
-        # Store seconds internally
-        scan_secs = _minutes_to_secs(mins, DEFAULT_SCAN_INTERVAL)
-
         data = {
-            "ip_range": ipr,  # raw string e.g. "10.0.0.0/24,10.0.3.0/24"
+            "ip_range": ipr,
             "nmap_args": (user_input.get("nmap_args") or DEFAULT_NMAP_ARGS).strip(),
-            "scan_interval": scan_secs,   # SECONDS (0 = disabled)
+            "scan_interval": scan_interval,  # seconds; 0 = manual only
             "mac_directory": directory,
             "mac_directory_json_url": (user_input.get("mac_directory_json_url") or "").strip(),
+            # ARP enrichment
+            CONF_ARP_PROVIDER:   provider,
+            CONF_ARP_BASE_URL:   (user_input.get(CONF_ARP_BASE_URL) or "").strip(),
+            CONF_ARP_KEY:        (user_input.get(CONF_ARP_KEY) or "").strip(),
+            CONF_ARP_SECRET:     (user_input.get(CONF_ARP_SECRET) or "").strip(),
+            CONF_ARP_VERIFY_TLS: bool(user_input.get(CONF_ARP_VERIFY_TLS, True)),
         }
         return self.async_create_entry(title="Network Scanner Extended", data=data)
 
-# ---------- Options Flow ----------
+# ---- Options Flow mirrors the same fields ----
 
 class NetworkScannerOptionsFlow(config_entries.OptionsFlow):
     def __init__(self, entry: config_entries.ConfigEntry) -> None:
@@ -165,30 +182,18 @@ class NetworkScannerOptionsFlow(config_entries.OptionsFlow):
         data = self.entry.data or {}
         opts = self.entry.options or {}
 
-        saved_secs = int(opts.get("scan_interval", data.get("scan_interval", DEFAULT_SCAN_INTERVAL)))
-        saved_mins = _secs_to_minutes(saved_secs)
-
         schema = vol.Schema({
-            vol.Required(
-                "ip_range",
-                default=opts.get("ip_range", data.get("ip_range", DEFAULT_IP_RANGE)),
-            ): str,
-            vol.Optional(
-                "nmap_args",
-                default=opts.get("nmap_args", data.get("nmap_args", DEFAULT_NMAP_ARGS)),
-            ): str,
-            vol.Optional(
-                "scan_interval_minutes",
-                default=saved_mins,
-            ): int,
-            vol.Optional(
-                "mac_directory_json_text",
-                description={"suggested_value": opts.get("mac_directory_json_text", "")},
-            ): TextSelector(),
-            vol.Optional(
-                "mac_directory_json_url",
-                default=opts.get("mac_directory_json_url", data.get("mac_directory_json_url", "")),
-            ): str,
+            vol.Required("ip_range", description={"suggested_value": opts.get("ip_range", data.get("ip_range", DEFAULT_IP_RANGE))}): str,
+            vol.Optional("nmap_args", description={"suggested_value": opts.get("nmap_args", data.get("nmap_args", DEFAULT_NMAP_ARGS))}): str,
+            vol.Optional("scan_interval", description={"suggested_value": opts.get("scan_interval", data.get("scan_interval", DEFAULT_SCAN_INTERVAL))}): int,
+            vol.Optional("mac_directory_json_text", description={"suggested_value": opts.get("mac_directory_json_text", "")}): TextSelector(),
+            vol.Optional("mac_directory_json_url",  description={"suggested_value": opts.get("mac_directory_json_url", data.get("mac_directory_json_url",""))}): str,
+            # ARP enrichment
+            vol.Optional(CONF_ARP_PROVIDER,   description={"suggested_value": opts.get(CONF_ARP_PROVIDER,   data.get(CONF_ARP_PROVIDER, ARP_PROVIDER_NONE))}): SelectProvider(ARP_PROVIDER_NONE),
+            vol.Optional(CONF_ARP_BASE_URL,   description={"suggested_value": opts.get(CONF_ARP_BASE_URL,   data.get(CONF_ARP_BASE_URL, ""))}): str,
+            vol.Optional(CONF_ARP_KEY,        description={"suggested_value": opts.get(CONF_ARP_KEY,        data.get(CONF_ARP_KEY, ""))}): str,
+            vol.Optional(CONF_ARP_SECRET,     description={"suggested_value": opts.get(CONF_ARP_SECRET,     data.get(CONF_ARP_SECRET, ""))}): PasswordSelector(),
+            vol.Optional(CONF_ARP_VERIFY_TLS, description={"suggested_value": opts.get(CONF_ARP_VERIFY_TLS, data.get(CONF_ARP_VERIFY_TLS, True))}): BoolSelector(True),
         })
 
         if user_input is None:
@@ -196,30 +201,28 @@ class NetworkScannerOptionsFlow(config_entries.OptionsFlow):
 
         errors: Dict[str, str] = {}
 
-        # Validate multi-CIDR again
+        # CIDRs
         ipr = (user_input.get("ip_range") or "").strip()
         cidrs = _split_cidrs(ipr)
         if not cidrs:
             errors["ip_range"] = "invalid_ip_range"
         else:
-            bad = []
             for c in cidrs:
                 try:
                     ip_network(c, strict=False)
                 except Exception:
-                    bad.append(c)
-            if bad:
-                errors["ip_range"] = "invalid_ip_range"
+                    errors["ip_range"] = "invalid_ip_range"
+                    break
 
-        # Validate minutes 0..1440
+        # scan interval
         try:
-            mins = int(user_input.get("scan_interval_minutes", saved_mins))
+            scan_interval = int(user_input.get("scan_interval", data.get("scan_interval", DEFAULT_SCAN_INTERVAL)))
         except Exception:
-            mins = saved_mins
-        if mins < 0 or mins > 1440:
-            errors["scan_interval_minutes"] = "invalid_scan_interval"
+            scan_interval = DEFAULT_SCAN_INTERVAL
+        if scan_interval < 0 or scan_interval > 24 * 3600:
+            errors["scan_interval"] = "invalid_scan_interval"
 
-        # Validate JSON text
+        # JSON text validation
         jtxt = (user_input.get("mac_directory_json_text") or "").strip()
         if jtxt:
             try:
@@ -230,22 +233,30 @@ class NetworkScannerOptionsFlow(config_entries.OptionsFlow):
             except Exception:
                 errors["mac_directory_json_text"] = "invalid_json"
 
+        # ARP validation
+        provider = (user_input.get(CONF_ARP_PROVIDER) or ARP_PROVIDER_NONE).strip().lower()
+        if provider == ARP_PROVIDER_OPNSENSE:
+            if not (user_input.get(CONF_ARP_BASE_URL) and user_input.get(CONF_ARP_KEY) and user_input.get(CONF_ARP_SECRET)):
+                errors[CONF_ARP_BASE_URL] = "required"
+                errors[CONF_ARP_KEY] = "required"
+                errors[CONF_ARP_SECRET] = "required"
+
         if errors:
             return self.async_show_form(step_id="user", data_schema=schema, errors=errors)
 
-        # Store seconds in OPTIONS (so Configure overrides take effect)
-        scan_secs = _minutes_to_secs(mins, DEFAULT_SCAN_INTERVAL)
-
-        return self.async_create_entry(
-            title="",
-            data={
-                "ip_range": ipr,
-                "nmap_args": (user_input.get("nmap_args") or DEFAULT_NMAP_ARGS).strip(),
-                "scan_interval": scan_secs,  # SECONDS; 0 disables auto-scan
-                "mac_directory_json_text": jtxt,
-                "mac_directory_json_url": (user_input.get("mac_directory_json_url") or "").strip(),
-            },
-        )
+        return self.async_create_entry(title="", data={
+            "ip_range": ipr,
+            "nmap_args": (user_input.get("nmap_args") or DEFAULT_NMAP_ARGS).strip(),
+            "scan_interval": scan_interval,
+            "mac_directory_json_text": jtxt,
+            "mac_directory_json_url": (user_input.get("mac_directory_json_url") or "").strip(),
+            # ARP enrichment
+            CONF_ARP_PROVIDER:   provider,
+            CONF_ARP_BASE_URL:   (user_input.get(CONF_ARP_BASE_URL) or "").strip(),
+            CONF_ARP_KEY:        (user_input.get(CONF_ARP_KEY) or "").strip(),
+            CONF_ARP_SECRET:     (user_input.get(CONF_ARP_SECRET) or "").strip(),
+            CONF_ARP_VERIFY_TLS: bool(user_input.get(CONF_ARP_VERIFY_TLS, True)),
+        })
 
 async def async_get_options_flow(config_entry: config_entries.ConfigEntry):
     return NetworkScannerOptionsFlow(config_entry)
