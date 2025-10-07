@@ -17,7 +17,7 @@ class NetworkScannerScanNow(ButtonEntity):
         self._attr_unique_id = f"{DOMAIN}_{entry.entry_id}_scan_now"
 
     async def async_press(self) -> None:
-        self._ctl.request_manual_scan()
+        self._ctl.start_scan_now()
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities):
     controller: ScanController = hass.data[DOMAIN][entry.entry_id]["controller"]
