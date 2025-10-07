@@ -9,6 +9,16 @@ DEFAULT_NMAP_ARGS = "-sn -PE -PS22,80,443 -PA80,443 -PU53 -T4"
 # Default scan interval in seconds (make it generous if your scans take minutes)
 DEFAULT_SCAN_INTERVAL = 240
 
+# ARP enrichment settings 
+CONF_ARP_PROVIDER   = "arp_provider"
+CONF_ARP_BASE_URL   = "arp_base_url"
+CONF_ARP_KEY        = "arp_key"
+CONF_ARP_SECRET     = "arp_secret"
+CONF_ARP_VERIFY_TLS = "arp_verify_tls"
+
+ARP_PROVIDER_NONE     = "none"
+ARP_PROVIDER_OPNSENSE = "opnsense"
+
 # Card-friendly status strings
 STATUS_IDLE = "idle"
 STATUS_SCANNING = "scanning"
