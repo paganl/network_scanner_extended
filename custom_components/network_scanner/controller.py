@@ -1,9 +1,9 @@
+# custom_components/network_scanner_extended/controller.py
 from __future__ import annotations
+from typing import Any, Dict, List, Optional
 import json
-import time
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
 
 import nmap
 from aiohttp import ClientError
@@ -11,7 +11,12 @@ from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .const import DEFAULT_NMAP_ARGS, DEFAULT_SCAN_INTERVAL, DOMAIN
+from .const import (
+    DOMAIN, DEFAULT_NMAP_ARGS, DEFAULT_SCAN_INTERVAL,
+    CONF_ARP_PROVIDER, CONF_ARP_BASE_URL, CONF_ARP_KEY, CONF_ARP_SECRET, CONF_ARP_VERIFY_TLS,
+    ARP_PROVIDER_NONE, ARP_PROVIDER_OPNSENSE,
+)
+from .opnsense import OPNsenseARPClient
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -21,119 +26,92 @@ def _now_iso() -> str:
 def _norm_mac(s: Optional[str]) -> str:
     return (s or "").upper()
 
-def _ip_key(ip_str: str) -> List[int]:
-    try:
-        return [int(p) for p in ip_str.split(".")]
-    except Exception:
-        return [999, 999, 999, 999]
-
-def _split_cidrs(raw: str) -> List[str]:
-    import re
-    return [p.strip() for p in re.split(r"[,\s]+", raw or "") if p.strip()]
+def _ip_key(ip: str) -> List[int]:
+    try: return [int(p) for p in ip.split(".")]
+    except Exception: return [999,999,999,999]
 
 def _parse_dir_obj(obj: Any) -> Dict[str, Dict[str, str]]:
     out: Dict[str, Dict[str, str]] = {}
-    if not isinstance(obj, dict):
-        return out
+    if not isinstance(obj, dict): return out
     block = obj.get("data", obj)
-    if not isinstance(block, dict):
-        return out
+    if not isinstance(block, dict): return out
     for k, v in block.items():
         mk = _norm_mac(k)
-        if not mk:
-            continue
+        if not mk and isinstance(k, str) and k.count(".") == 3:
+            # allow IP keys in directory
+            mk = k.strip()  # keep as IP
+        if not mk: continue
         if isinstance(v, dict):
-            out[mk] = {"name": str(v.get("name", "")), "desc": str(v.get("desc", ""))}
+            out[mk] = {"name": str(v.get("name","")), "desc": str(v.get("desc",""))}
         else:
             out[mk] = {"name": str(v), "desc": ""}
     return out
 
-
 class ScanController:
-    """Holds scan config + state; performs nmap run when asked."""
+    """Holds config, runs scans, merges ARP, exposes state."""
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         self.hass = hass
-        self.entry = entry
-
-        self._cidrs: List[str] = []
-        self._nmap_args: str = DEFAULT_NMAP_ARGS
-        self._scan_interval: int = DEFAULT_SCAN_INTERVAL
-
-        # state
-        self.status: str = "idle"           # idle|scanning|ok|error
-        self.last_scan_started: Optional[str] = None
-        self.last_scan_finished: Optional[str] = None
+        self.nm = nmap.PortScanner()
         self.devices: List[Dict[str, Any]] = []
         self.device_count: Optional[int] = None
+        self.status: str = "idle"
+        self.last_scan_started: Optional[str] = None
+        self.last_scan_finished: Optional[str] = None
 
-        self._next_allowed = 0.0
-        self._nm = nmap.PortScanner()
+        # populated by apply_entry
+        self.cidrs: List[str] = []
+        self.nmap_args: str = DEFAULT_NMAP_ARGS
+        self.scan_interval: int = DEFAULT_SCAN_INTERVAL
+
+        # ARP enrichment
+        self._arp_provider: str = ARP_PROVIDER_NONE
+        self._arp: Optional[OPNsenseARPClient] = None
 
         self.apply_entry(entry)
 
-    # -------- config application --------
     def apply_entry(self, entry: ConfigEntry) -> None:
-        self.entry = entry
-        raw_ip = (entry.options.get("ip_range") or entry.data.get("ip_range") or "").strip()
-        self._cidrs = _split_cidrs(raw_ip)
+        data = entry.data or {}
+        opts = entry.options or {}
+        raw_ranges = (opts.get("ip_range") or data.get("ip_range") or "").strip()
+        self.cidrs = [p.strip() for p in raw_ranges.replace(",", " ").split() if p.strip()]
+        self.nmap_args = (opts.get("nmap_args") or data.get("nmap_args") or DEFAULT_NMAP_ARGS).strip()
+        self.scan_interval = int(opts.get("scan_interval", data.get("scan_interval", DEFAULT_SCAN_INTERVAL)))
 
-        self._nmap_args = (entry.options.get("nmap_args")
-                           or entry.data.get("nmap_args")
-                           or DEFAULT_NMAP_ARGS).strip()
+        # ARP provider config
+        prov = (opts.get(CONF_ARP_PROVIDER, data.get(CONF_ARP_PROVIDER, ARP_PROVIDER_NONE)) or "").lower()
+        base = opts.get(CONF_ARP_BASE_URL,   data.get(CONF_ARP_BASE_URL,   ""))
+        key  = opts.get(CONF_ARP_KEY,        data.get(CONF_ARP_KEY,        ""))
+        sec  = opts.get(CONF_ARP_SECRET,     data.get(CONF_ARP_SECRET,     ""))
+        vfy  = bool(opts.get(CONF_ARP_VERIFY_TLS, data.get(CONF_ARP_VERIFY_TLS, True)))
 
-        try:
-            self._scan_interval = int(entry.options.get("scan_interval")
-                                      or entry.data.get("scan_interval")
-                                      or DEFAULT_SCAN_INTERVAL)
-        except Exception:
-            self._scan_interval = DEFAULT_SCAN_INTERVAL
+        self._arp_provider = prov
+        self._arp = None
+        if prov == ARP_PROVIDER_OPNSENSE and base and key and sec:
+            self._arp = OPNsenseARPClient(base, key, sec, verify_tls=vfy)
 
-        # force immediate eligibility after config changes
-        self._next_allowed = 0.0
-
-    # -------- public read-only props for entities --------
-    @property
-    def cidrs(self) -> List[str]:
-        return self._cidrs
-
-    @property
-    def nmap_args(self) -> str:
-        return self._nmap_args
-
-    @property
-    def scan_interval(self) -> int:
-        return self._scan_interval
-
-    # -------- scanning --------
     async def maybe_auto_scan(self) -> None:
-        """Run a scan when interval elapsed; no-op if interval=0 (manual mode)."""
-        if self._scan_interval <= 0:
+        """Run a scan if auto-scan is enabled (scan_interval > 0)."""
+        if self.scan_interval == 0:
             return
-        now = time.monotonic()
-        if now >= self._next_allowed:
-            await self.run_scan(force=True)
+        await self.run_scan()
 
-    async def run_scan(self, force: bool = True) -> None:
-        """Always perform a scan (manual button or auto); ‘force’ ignored here for clarity."""
-        self.status = "scanning"
-        self.last_scan_started = _now_iso()
+    async def run_scan(self) -> None:
         try:
-            directory: Dict[str, Dict[str, str]] = dict(self.entry.data.get("mac_directory", {}))
-            opts = self.entry.options or {}
+            self.status = "scanning"
+            self.last_scan_started = _now_iso()
 
-            # merge JSON text (highest precedence)
-            jtxt = (opts.get("mac_directory_json_text") or "").strip()
+            # Build effective directory: entry data + options JSON/URL already parsed by your flow
+            directory: Dict[str, Dict[str, str]] = {}
+            entry = self._get_entry()
+            directory.update(entry.data.get("mac_directory", {}))
+            jtxt = (entry.options.get("mac_directory_json_text") or "")
             if jtxt:
                 try:
                     directory.update(_parse_dir_obj(json.loads(jtxt)))
                 except Exception as exc:
-                    _LOGGER.warning("Invalid options JSON: %s", exc)
-
-            # optional URL
-            url = (opts.get("mac_directory_json_url")
-                   or self.entry.data.get("mac_directory_json_url")
-                   or "").strip()
+                    _LOGGER.debug("Directory JSON invalid: %s", exc)
+            url = entry.options.get("mac_directory_json_url") or entry.data.get("mac_directory_json_url")
             if url:
                 try:
                     session = async_get_clientsession(self.hass)
@@ -141,22 +119,27 @@ class ScanController:
                         resp.raise_for_status()
                         directory.update(_parse_dir_obj(json.loads(await resp.text())))
                 except (ClientError, Exception) as exc:
-                    _LOGGER.warning("Failed to fetch directory URL %s: %s", url, exc)
+                    _LOGGER.debug("Directory URL fetch failed: %s", exc)
 
-            # scan each cidr
+            # ARP enrichment from OPNsense (optional)
+            arp_map: Dict[str, str] = {}
+            if self._arp:
+                try:
+                    arp_map = await self._arp.fetch_map(self.hass)
+                except Exception as exc:
+                    _LOGGER.debug("OPNsense ARP fetch failed: %s", exc)
+
+            # Scan each CIDR
             all_devices: List[Dict[str, Any]] = []
-            for cidr in self._cidrs:
-                chunk = await self.hass.async_add_executor_job(
-                    self._scan_cidr, cidr, directory, self._nmap_args
-                )
-                all_devices.extend(chunk)
+            for cidr in self.cidrs:
+                all_devices.extend(await self.hass.async_add_executor_job(self._scan_cidr, cidr, directory, arp_map, self.nmap_args))
 
-            # dedup by MAC
+            # Deduplicate: prefer MAC, fallback to IP
             dedup: Dict[str, Dict[str, Any]] = {}
             for d in all_devices:
-                mk = _norm_mac(d.get("mac"))
-                if mk and mk not in dedup:
-                    dedup[mk] = d
+                key = _norm_mac(d.get("mac")) or f"IP:{d.get('ip','')}"
+                if key and key not in dedup:
+                    dedup[key] = d
 
             devices = list(dedup.values())
             devices.sort(key=lambda d: _ip_key(d.get("ip", "")))
@@ -169,25 +152,33 @@ class ScanController:
             _LOGGER.error("Network scan failed: %s", exc)
         finally:
             self.last_scan_finished = _now_iso()
-            # schedule next auto run (or never if manual mode)
-            if self._scan_interval <= 0:
-                self._next_allowed = float("inf")
-            else:
-                self._next_allowed = time.monotonic() + max(30, self._scan_interval)
 
-    # -------- sync helper --------
-    def _scan_cidr(self, cidr: str, directory: Dict[str, Dict[str, str]], nmap_args: str) -> List[Dict[str, Any]]:
+    # -------- internals --------
+
+    def _get_entry(self) -> ConfigEntry:
+        # Helper to find the current entry via hass.data
+        for entry_id, blob in self.hass.data.get(DOMAIN, {}).items():
+            if blob.get("controller") is self:
+                # @ts-ignore - we don’t need the actual type here
+                return blob["entry"] if "entry" in blob else blob.get("config_entry") or blob.get("entry_obj")
+        # Fallback: not strictly needed if you pass entry in hass.data
+        raise RuntimeError("controller: config entry not found in hass.data")
+
+    def _scan_cidr(self, cidr: str, directory: Dict[str, Dict[str, str]], arp_map: Dict[str, str], nmap_args: str) -> List[Dict[str, Any]]:
         res: List[Dict[str, Any]] = []
-        self._nm.scan(hosts=cidr, arguments=nmap_args)
-        for host in self._nm.all_hosts():
+        self.nm.scan(hosts=cidr, arguments=nmap_args)
+        for host in self.nm.all_hosts():
             try:
-                node = self._nm[host]
+                node = self.nm[host]
                 addrs = node.get("addresses", {})
                 ip = addrs.get("ipv4") or addrs.get("ipv6") or ""
-                if not ip:
-                    continue
-
                 mac = addrs.get("mac") or ""
+
+                # Enrich MAC from router ARP map if missing (typical across VLANs)
+                if not mac and ip and ip in arp_map:
+                    mac = arp_map[ip]
+
+                # Vendor
                 vendor = "Unknown"
                 ven_map = node.get("vendor", {})
                 if isinstance(ven_map, dict):
@@ -196,20 +187,29 @@ class ScanController:
                             vendor = v
                             break
 
+                # Hostname (nmap) – you can also add reverse DNS here if you like
                 hostname = node.hostname() or ""
-                override = directory.get(_norm_mac(mac), {}) if mac else {}
+
+                # Directory override by MAC first, then IP key
+                override = {}
+                if mac:
+                    override = directory.get(_norm_mac(mac), {})
+                if not override and ip:
+                    override = directory.get(ip, {})
+
                 name = override.get("name") or "Unknown Device"
                 desc = override.get("desc") or "Unknown Device"
 
-                res.append({
-                    "ip": ip,
-                    "mac": mac,
-                    "name": name,
-                    "type": desc,
-                    "vendor": vendor,
-                    "hostname": hostname,
-                    "cidr": cidr,
-                })
+                if ip:
+                    res.append({
+                        "ip": ip,
+                        "mac": mac,
+                        "name": name,
+                        "type": desc,
+                        "vendor": vendor,
+                        "hostname": hostname,
+                        "cidr": cidr,
+                    })
             except Exception as exc:
-                _LOGGER.debug("Skipping host %s: %s", host, exc)
+                _LOGGER.debug("Skip host %s: %s", host, exc)
         return res
