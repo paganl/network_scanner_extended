@@ -22,6 +22,16 @@ from .const import DOMAIN, DEFAULT_IP_RANGE, DEFAULT_SCAN_INTERVAL, DEFAULT_NMAP
 
 _LOGGER = logging.getLogger(__name__)
 
+def _secs_to_minutes(secs: int | None) -> int:
+    if not isinstance(secs, int) or secs < 0:
+        return 0
+    return max(0, round(secs / 60))
+
+def _minutes_to_secs(mins: int | None, default_secs: int) -> int:
+    if not isinstance(mins, int) or mins < 0:
+        return default_secs
+    return 0 if mins == 0 else mins * 60
+
 def _split_cidrs(s: str) -> list[str]:
     # split on commas or whitespace
     return [p.strip() for p in re.split(r"[,\s]+", s or "") if p.strip()]
