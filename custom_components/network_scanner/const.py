@@ -1,4 +1,6 @@
-DOMAIN = "network_scanner"
+from __future__ import annotations
+
+DOMAIN: str = "network_scanner"
 
 # Default UI values
 DEFAULT_IP_RANGE = "192.168.1.0/24"
