@@ -15,6 +15,7 @@ from .const import (
     DEFAULT_NMAP_ARGS,
     DEFAULT_SCAN_INTERVAL,
     OPNSENSE_ARP_PATH,
+    DOMAIN,
 )
 
 _LOGGER = logging.getLogger(__name__)
