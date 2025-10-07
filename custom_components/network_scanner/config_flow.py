@@ -19,6 +19,8 @@ from .const import DOMAIN, DEFAULT_IP_RANGE
 
 _LOGGER = logging.getLogger(__name__)
 
+DEFAULT_NMAP_ARGS = "-sn -PE -PS22,80,443 -PA80,443 -PU53 -T4"
+
 def _normalise_mac_key(mac: str) -> str:
     return mac.upper() if isinstance(mac, str) else ""
 
@@ -29,6 +31,7 @@ class NetworkScannerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         yaml_defaults = self.hass.data.get(DOMAIN, {}) or {}
         schema = vol.Schema({
             vol.Required("ip_range", description={"suggested_value": yaml_defaults.get("ip_range", DEFAULT_IP_RANGE)}): str,
+            vol.Optional("nmap_args", description={"suggested_value": DEFAULT_NMAP_ARGS}): str,
             vol.Optional("mac_directory_json_text", description={"suggested_value": ""}): TextSelector(),
             vol.Optional("mac_directory_json_url", description={"suggested_value": ""}): str,
         })
@@ -98,6 +101,7 @@ class NetworkScannerOptionsFlow(config_entries.OptionsFlow):
 
         schema = vol.Schema({
             vol.Required("ip_range", description={"suggested_value": opts.get("ip_range", data.get("ip_range", DEFAULT_IP_RANGE))}): str,
+            vol.Optional("nmap_args", description={"suggested_value": DEFAULT_NMAP_ARGS}): str,
             vol.Optional("mac_directory_json_text", description={"suggested_value": opts.get("mac_directory_json_text", "")}): TextSelector(),
             vol.Optional("mac_directory_json_url", description={"suggested_value": opts.get("mac_directory_json_url", data.get("mac_directory_json_url",""))}): str,
         })
