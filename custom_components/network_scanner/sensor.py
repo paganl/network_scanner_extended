@@ -76,9 +76,11 @@ class NetworkScannerExtended(SensorEntity):
     def _get_nmap_args(entry: ConfigEntry) -> str:
         return (entry.options.get("nmap_args") or DEFAULT_NMAP_ARGS).strip()
 
+
     @property
     def unique_id(self) -> str:
-        return f"{DOMAIN}_{'_'.join(self._cidrs) or 'unset'}"
+        # use the config entry id to guarantee uniqueness across entries
+        return f"{DOMAIN}_{self.entry.entry_id}"
 
     @property
     def native_value(self) -> Optional[int]:
