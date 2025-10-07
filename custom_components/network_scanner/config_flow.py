@@ -4,23 +4,20 @@ import logging
 import re
 from ipaddress import ip_network
 from typing import Any, Dict
-from .const import DEFAULT_SCAN_INTERVAL
 
 import voluptuous as vol
 from homeassistant import config_entries
 
-# Text selector (multiline) when available
-try:
-    from homeassistant.helpers.selector import selector as ha_selector
-    def TextSelector():
-        return ha_selector({"text": {"multiline": True}})
-except Exception:
-    def TextSelector():
-        return str
-
-from .const import DOMAIN, DEFAULT_IP_RANGE, DEFAULT_SCAN_INTERVAL, DEFAULT_NMAP_ARGS
+from .const import (
+    DOMAIN,
+    DEFAULT_IP_RANGE,
+    DEFAULT_SCAN_INTERVAL,   # seconds
+    DEFAULT_NMAP_ARGS,
+)
 
 _LOGGER = logging.getLogger(__name__)
+
+# ---------- helpers ----------
 
 def _secs_to_minutes(secs: int | None) -> int:
     if not isinstance(secs, int) or secs < 0:
@@ -39,26 +36,57 @@ def _split_cidrs(s: str) -> list[str]:
 def _normalise_mac_key(mac: str) -> str:
     return mac.upper() if isinstance(mac, str) else ""
 
+# Selectors (text + number with minutes) when available
+try:
+    from homeassistant.helpers.selector import selector as ha_selector
+
+    def TextSelector():
+        return ha_selector({"text": {"multiline": True}})
+
+    def NumberMinutesSelector(default_val: int):
+        # Render a number input with "min" unit
+        return ha_selector({
+            "number": {
+                "min": 0, "max": 1440, "step": 1, "mode": "box",
+                "unit_of_measurement": "min",
+                "value": default_val,
+            }
+        })
+except Exception:
+    # Fallbacks for very old cores
+    def TextSelector():
+        return str
+    def NumberMinutesSelector(_default_val: int):
+        return int
+
+# ---------- Config Flow ----------
+
 class NetworkScannerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
 
     async def async_step_user(self, user_input=None):
         yaml_defaults = self.hass.data.get(DOMAIN, {}) or {}
+
+        current_secs = yaml_defaults.get("scan_interval", DEFAULT_SCAN_INTERVAL)
+        current_mins = _secs_to_minutes(current_secs)
+
         schema = vol.Schema({
             vol.Required(
                 "ip_range",
                 description={"suggested_value": yaml_defaults.get("ip_range", DEFAULT_IP_RANGE)},
             ): str,
             vol.Optional(
-                "scan_interval",
-                description={"suggested_value": DEFAULT_SCAN_INTERVAL},
-            ): int,
-            vol.Optional(
                 "nmap_args",
                 description={"suggested_value": DEFAULT_NMAP_ARGS},
             ): str,
-            vol.Optional("mac_directory_json_text", description={"suggested_value": ""}): TextSelector(),
-            vol.Optional("mac_directory_json_url",  description={"suggested_value": ""}): str,
+            vol.Optional(
+                "scan_interval_minutes",
+                description={"suggested_value": current_mins},
+            ): NumberMinutesSelector(current_mins),
+            vol.Optional("mac_directory_json_text",
+                         description={"suggested_value": ""}): TextSelector(),
+            vol.Optional("mac_directory_json_url",
+                         description={"suggested_value": ""}): str,
         })
 
         if user_input is None:
@@ -81,10 +109,13 @@ class NetworkScannerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if bad:
                 errors["ip_range"] = "invalid_ip_range"
 
-        # Validate scan interval
-        scan_interval = int(user_input.get("scan_interval") or DEFAULT_SCAN_INTERVAL)
-        if scan_interval < 30 or scan_interval > 3600:
-            errors["scan_interval"] = "invalid_scan_interval"
+        # Validate minutes (0..1440)
+        try:
+            mins = int(user_input.get("scan_interval_minutes", current_mins))
+        except Exception:
+            mins = current_mins
+        if mins < 0 or mins > 1440:
+            errors["scan_interval_minutes"] = "invalid_scan_interval"
 
         # Light validation of JSON text
         jtxt = (user_input.get("mac_directory_json_text") or "").strip()
@@ -115,16 +146,19 @@ class NetworkScannerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     else:
                         directory[mk] = {"name": str(v), "desc": ""}
 
+        # Store seconds internally
+        scan_secs = _minutes_to_secs(mins, DEFAULT_SCAN_INTERVAL)
+
         data = {
-            "ip_range": ipr,  # NOTE: we keep the raw string "10.0.0.0/24,10.0.3.0/24"
+            "ip_range": ipr,  # keep raw string e.g. "10.0.0.0/24,10.0.3.0/24"
+            "nmap_args": (user_input.get("nmap_args") or DEFAULT_NMAP_ARGS).strip(),
+            "scan_interval": scan_secs,   # SECONDS
             "mac_directory": directory,
             "mac_directory_json_url": (user_input.get("mac_directory_json_url") or "").strip(),
-            "nmap_args": (user_input.get("nmap_args") or DEFAULT_NMAP_ARGS).strip(),
-            "scan_interval": int(user_input.get("scan_interval", DEFAULT_SCAN_INTERVAL))
         }
         return self.async_create_entry(title="Network Scanner Extended", data=data)
 
-# ---- Options Flow ----
+# ---------- Options Flow ----------
 
 class NetworkScannerOptionsFlow(config_entries.OptionsFlow):
     def __init__(self, entry: config_entries.ConfigEntry) -> None:
@@ -137,19 +171,22 @@ class NetworkScannerOptionsFlow(config_entries.OptionsFlow):
         data = self.entry.data or {}
         opts = self.entry.options or {}
 
+        saved_secs = opts.get("scan_interval", data.get("scan_interval", DEFAULT_SCAN_INTERVAL))
+        saved_mins = _secs_to_minutes(saved_secs)
+
         schema = vol.Schema({
             vol.Required(
                 "ip_range",
                 description={"suggested_value": opts.get("ip_range", data.get("ip_range", DEFAULT_IP_RANGE))},
             ): str,
             vol.Optional(
-                "scan_interval",
-                description={"suggested_value": opts.get("scan_interval", data.get("scan_interval", DEFAULT_SCAN_INTERVAL))},
-            ): int,
-            vol.Optional(
                 "nmap_args",
                 description={"suggested_value": opts.get("nmap_args", data.get("nmap_args", DEFAULT_NMAP_ARGS))},
             ): str,
+            vol.Optional(
+                "scan_interval_minutes",
+                description={"suggested_value": saved_mins},
+            ): NumberMinutesSelector(saved_mins),
             vol.Optional(
                 "mac_directory_json_text",
                 description={"suggested_value": opts.get("mac_directory_json_text", "")},
@@ -180,10 +217,13 @@ class NetworkScannerOptionsFlow(config_entries.OptionsFlow):
             if bad:
                 errors["ip_range"] = "invalid_ip_range"
 
-        # Validate scan interval
-        scan_interval = int(user_input.get("scan_interval") or DEFAULT_SCAN_INTERVAL)
-        if scan_interval < 0 or scan_interval > 3600:
-            errors["scan_interval"] = "invalid_scan_interval"
+        # Validate minutes
+        try:
+            mins = int(user_input.get("scan_interval_minutes", saved_mins))
+        except Exception:
+            mins = saved_mins
+        if mins < 0 or mins > 1440:
+            errors["scan_interval_minutes"] = "invalid_scan_interval"
 
         # Validate JSON text
         jtxt = (user_input.get("mac_directory_json_text") or "").strip()
@@ -199,10 +239,13 @@ class NetworkScannerOptionsFlow(config_entries.OptionsFlow):
         if errors:
             return self.async_show_form(step_id="user", data_schema=schema, errors=errors)
 
+        # Store seconds in OPTIONS (so Configure overrides take effect)
+        scan_secs = _minutes_to_secs(mins, DEFAULT_SCAN_INTERVAL)
+
         return self.async_create_entry(title="", data={
             "ip_range": ipr,
-            "scan_interval": scan_interval,
             "nmap_args": (user_input.get("nmap_args") or DEFAULT_NMAP_ARGS).strip(),
+            "scan_interval": scan_secs,  # SECONDS; 0 disables auto-scan
             "mac_directory_json_text": jtxt,
             "mac_directory_json_url": (user_input.get("mac_directory_json_url") or "").strip(),
         })
