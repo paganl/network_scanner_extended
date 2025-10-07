@@ -1,5 +1,6 @@
-# custom_components/network_scanner_extended/controller.py
+# custom_components/network_scanner/controller.py
 from __future__ import annotations
+import asyncio
 import json
 import logging
 from datetime import datetime, timezone, timedelta
@@ -12,10 +13,10 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
+    DOMAIN,
     DEFAULT_NMAP_ARGS,
     DEFAULT_SCAN_INTERVAL,
-    OPNSENSE_ARP_PATH,
-    DOMAIN,
+    OPNSENSE_ARP_PATH,  # e.g. "/api/diagnostics/interface/search_arp/"
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -61,29 +62,30 @@ def _parse_dir_obj(obj: Any) -> Dict[str, Dict[str, str]]:
 
 
 class ScanController:
-    """Holds config, runs scans, exposes state to entities and button."""
+    """Holds config, runs scans in the background, exposes state to entities/button."""
 
     def __init__(self, hass: HomeAssistant, entry) -> None:
         self.hass = hass
         self.entry = entry
+
         self.status: str = "idle"
         self.last_scan_started: Optional[str] = None
         self.last_scan_finished: Optional[str] = None
 
         self._devices: List[Dict[str, Any]] = []
-        self._nm = nmap.PortScanner()
-        self._manual_requested = False
+        self._scan_lock = asyncio.Lock()
         self._last_run: Optional[datetime] = None
 
+        # Config
         self.cidrs: List[str] = []
         self.nmap_args: str = DEFAULT_NMAP_ARGS
         self.scan_interval: int = DEFAULT_SCAN_INTERVAL  # seconds
 
         # OPNsense settings
-        self.opn_url: str = ""
+        self.opn_url: str = ""          # e.g. "https://10.0.0.2"
         self.opn_key: str = ""
         self.opn_secret: str = ""
-        self.opn_interface: str = ""
+        self.opn_interface: str = ""    # optional interface name
 
         self.apply_entry(entry)
 
@@ -113,119 +115,121 @@ class ScanController:
         self.opn_secret = (opts.get("opnsense_secret", data.get("opnsense_secret", "")) or "").strip()
         self.opn_interface = (opts.get("opnsense_interface", data.get("opnsense_interface", "")) or "").strip()
 
-    # --- called by button entity ---
-    def request_manual_scan(self) -> None:
-        self._manual_requested = True
-
-    # --- called by sensors on update ---
-    async def maybe_auto_scan(self) -> None:
-        # Manual?
-        if self._manual_requested:
-            self._manual_requested = False
-            await self._do_scan()
+    # --- button entry point: starts a scan immediately in background ---
+    def start_scan_now(self) -> None:
+        if not self.hass:
             return
+        if self._scan_lock.locked():
+            _LOGGER.debug("Scan requested but one is already running; ignoring.")
+            return
+        self.hass.async_create_task(self._do_scan())
 
+    # --- sensors call this on their async_update; non-blocking ---
+    async def maybe_auto_scan(self) -> None:
         # Auto disabled?
         if self.scan_interval == 0:
             return
 
-        # Run if never ran or enough time elapsed
         now = datetime.now(timezone.utc)
         if not self._last_run or (now - self._last_run) >= timedelta(seconds=self.scan_interval):
-            await self._do_scan()
+            if not self._scan_lock.locked():
+                self.hass.async_create_task(self._do_scan())
 
-    # --- core scan ---
+    # --- core scan (background task) ---
     async def _do_scan(self) -> None:
-        try:
-            self.status = "scanning"
-            self.last_scan_started = _now_iso()
+        async with self._scan_lock:
+            try:
+                self.status = "scanning"
+                self.last_scan_started = _now_iso()
 
-            # effective directory (data + options)
-            directory: Dict[str, Dict[str, str]] = dict(self.entry.data.get("mac_directory", {}))
-            opts = self.entry.options or {}
+                # effective directory (data + options)
+                directory: Dict[str, Dict[str, str]] = dict(self.entry.data.get("mac_directory", {}))
+                opts = self.entry.options or {}
 
-            # options JSON text
-            jtxt = (opts.get("mac_directory_json_text") or "").strip()
-            if jtxt:
-                try:
-                    directory.update(_parse_dir_obj(json.loads(jtxt)))
-                except Exception as exc:
-                    _LOGGER.warning("Invalid options JSON, ignoring: %s", exc)
+                # options JSON text
+                jtxt = (opts.get("mac_directory_json_text") or "").strip()
+                if jtxt:
+                    try:
+                        directory.update(_parse_dir_obj(json.loads(jtxt)))
+                    except Exception as exc:
+                        _LOGGER.warning("Invalid options JSON, ignoring: %s", exc)
 
-            # options/data URL (optional)
-            url = (opts.get("mac_directory_json_url") or self.entry.data.get("mac_directory_json_url") or "").strip()
-            if url:
-                try:
-                    session = async_get_clientsession(self.hass)
-                    async with session.get(url, timeout=10) as resp:
-                        resp.raise_for_status()
-                        directory.update(_parse_dir_obj(json.loads(await resp.text())))
-                except (ClientError, Exception) as exc:
-                    _LOGGER.warning("Failed to fetch directory URL %s: %s", url, exc)
+                # options/data URL (optional)
+                url = (opts.get("mac_directory_json_url") or self.entry.data.get("mac_directory_json_url") or "").strip()
+                if url:
+                    try:
+                        session = async_get_clientsession(self.hass)
+                        async with session.get(url, timeout=10) as resp:
+                            resp.raise_for_status()
+                            directory.update(_parse_dir_obj(json.loads(await resp.text())))
+                    except (ClientError, Exception) as exc:
+                        _LOGGER.warning("Failed to fetch directory URL %s: %s", url, exc)
 
-            # 1) nmap across all CIDRs (executor)
-            all_devices: List[Dict[str, Any]] = []
-            for cidr in self.cidrs:
-                chunk = await self.hass.async_add_executor_job(self._scan_cidr, cidr, directory, self.nmap_args)
-                all_devices.extend(chunk)
+                # 1) nmap across all CIDRs (executor; per-CIDR PortScanner())
+                all_devices: List[Dict[str, Any]] = []
+                for cidr in self.cidrs:
+                    chunk = await self.hass.async_add_executor_job(
+                        self._scan_cidr, cidr, directory, self.nmap_args
+                    )
+                    all_devices.extend(chunk)
 
-            # 2) OPNsense ARP fallback (optional)
-            ip_to_mac: Dict[str, str] = {}
-            if self.opn_url and self.opn_key and self.opn_secret:
-                try:
-                    ip_to_mac = await self._fetch_opnsense_arp()
-                except Exception as exc:
-                    _LOGGER.warning("OPNsense ARP fetch failed: %s", exc)
+                # 2) OPNsense ARP (optional)
+                ip_to_mac: Dict[str, str] = {}
+                if self.opn_url and self.opn_key and self.opn_secret:
+                    try:
+                        ip_to_mac = await self._fetch_opnsense_arp()
+                    except Exception as exc:
+                        _LOGGER.warning("OPNsense ARP fetch failed: %s", exc)
 
-            # Fill missing MACs from ARP
-            ip_seen = set()
-            for d in all_devices:
-                ip_seen.add(d.get("ip", ""))
-                if not d.get("mac"):
-                    mac = _norm_mac(ip_to_mac.get(d.get("ip", "")))
-                    if mac:
-                        d["mac"] = mac
-                        # apply directory override if present
-                        ov = directory.get(mac, {})
-                        if ov:
-                            d["name"] = ov.get("name") or d["name"]
-                            d["type"] = ov.get("desc") or d["type"]
+                # Patch missing MACs with ARP
+                ip_seen = set()
+                for d in all_devices:
+                    ip_seen.add(d.get("ip", ""))
+                    if not d.get("mac"):
+                        mac = _norm_mac(ip_to_mac.get(d.get("ip", "")))
+                        if mac:
+                            d["mac"] = mac
+                            ov = directory.get(mac, {})
+                            if ov:
+                                d["name"] = ov.get("name") or d["name"]
+                                d["type"] = ov.get("desc") or d["type"]
 
-            # Add ARP-only devices (within our CIDRs)
-            for ip, mac in ip_to_mac.items():
-                if ip in ip_seen or not _in_any_cidr(ip, self.cidrs):
-                    continue
-                mm = directory.get(_norm_mac(mac), {})
-                all_devices.append({
-                    "ip": ip,
-                    "mac": mac,
-                    "name": mm.get("name") or "Unknown Device",
-                    "type": mm.get("desc") or "Unknown Device",
-                    "vendor": "Unknown",
-                    "hostname": "",
-                    "cidr": self._cidr_for_ip(ip),
-                    "source": "arp"
-                })
+                # Add ARP-only devices inside our CIDRs
+                for ip, mac in ip_to_mac.items():
+                    if ip in ip_seen or not _in_any_cidr(ip, self.cidrs):
+                        continue
+                    mm = directory.get(_norm_mac(mac), {})
+                    all_devices.append({
+                        "ip": ip,
+                        "mac": mac,
+                        "name": mm.get("name") or "Unknown Device",
+                        "type": mm.get("desc") or "Unknown Device",
+                        "vendor": "Unknown",
+                        "hostname": "",
+                        "cidr": self._cidr_for_ip(ip),
+                        "source": "arp",
+                    })
 
-            # Dedup by MAC (prefer nmap over ARP-only)
-            dedup: Dict[str, Dict[str, Any]] = {}
-            for d in all_devices:
-                mk = _norm_mac(d.get("mac"))
-                key = mk or f"IP:{d.get('ip','')}"
-                if key not in dedup:
-                    dedup[key] = d
+                # Dedup: prefer first seen (nmap entries come first)
+                dedup: Dict[str, Dict[str, Any]] = {}
+                for d in all_devices:
+                    mk = _norm_mac(d.get("mac"))
+                    key = mk or f"IP:{d.get('ip','')}"
+                    if key not in dedup:
+                        dedup[key] = d
 
-            devices = list(dedup.values())
-            devices.sort(key=lambda d: _ip_key(d.get("ip", "")))
+                devices = list(dedup.values())
+                devices.sort(key=lambda d: _ip_key(d.get("ip", "")))
 
-            self._devices = devices
-            self.status = "ok"
-        except Exception as exc:
-            self.status = "error"
-            _LOGGER.exception("Network scan failed: %s", exc)
-        finally:
-            self._last_run = datetime.now(timezone.utc)
-            self.last_scan_finished = _now_iso()
+                self._devices = devices
+                self.status = "ok"
+                _LOGGER.debug("Scan done: %d devices (nmap+arp)", len(devices))
+            except Exception as exc:
+                self.status = "error"
+                _LOGGER.exception("Network scan failed: %s", exc)
+            finally:
+                self._last_run = datetime.now(timezone.utc)
+                self.last_scan_finished = _now_iso()
 
     def _cidr_for_ip(self, ip_str: str) -> str:
         try:
@@ -238,16 +242,19 @@ class ScanController:
         return ""
 
     def _scan_cidr(self, cidr: str, directory: Dict[str, Dict[str, str]], nmap_args: str) -> List[Dict[str, Any]]:
+        """Runs one CIDR ping-scan using a fresh PortScanner (threadpool)."""
         res: List[Dict[str, Any]] = []
-        self._nm.scan(hosts=cidr, arguments=nmap_args)
-        for host in self._nm.all_hosts():
+        nm = nmap.PortScanner()
+        nm.scan(hosts=cidr, arguments=nmap_args)
+        for host in nm.all_hosts():
             try:
-                node = self._nm[host]
+                node = nm[host]
                 addrs = node.get("addresses", {})
                 mac = addrs.get("mac")
                 ip = addrs.get("ipv4") or addrs.get("ipv6") or ""
                 if not ip:
                     continue
+
                 vendor = "Unknown"
                 ven_map = node.get("vendor", {})
                 if isinstance(ven_map, dict):
@@ -255,10 +262,12 @@ class ScanController:
                         if _norm_mac(k) == _norm_mac(mac):
                             vendor = v
                             break
+
                 hostname = node.hostname() or ""
                 ov = directory.get(_norm_mac(mac), {}) if mac else {}
                 name = ov.get("name") or "Unknown Device"
                 desc = ov.get("desc") or "Unknown Device"
+
                 res.append({
                     "ip": ip,
                     "mac": mac or "",
@@ -275,16 +284,24 @@ class ScanController:
 
     async def _fetch_opnsense_arp(self) -> Dict[str, str]:
         """Return mapping {ip: mac} from OPNsense ARP table."""
-        base = self.opn_url
+        base = (self.opn_url or "").rstrip("/")
         if not base:
             return {}
+
+        # Normalize path (accept with/without trailing slash)
+        path = OPNSENSE_ARP_PATH
+        if not path.startswith("/"):
+            path = "/" + path
+        if not path.endswith("/"):
+            path = path + "/"
+        url = f"{base}{path}"
+
         session = async_get_clientsession(self.hass)
         auth = BasicAuth(self.opn_key, self.opn_secret)
         payload: Dict[str, Any] = {"current": 1, "rowCount": 9999, "searchPhrase": ""}
         if self.opn_interface:
             payload["interface"] = self.opn_interface
 
-        url = f"{base}{OPNSENSE_ARP_PATH}"
         try:
             async with session.post(url, json=payload, auth=auth, ssl=False, timeout=15) as resp:
                 resp.raise_for_status()
@@ -305,5 +322,6 @@ class ScanController:
             mac = _norm_mac(str(r.get("mac") or r.get("macaddr") or r.get("ether") or "").strip())
             if ip and mac:
                 out[ip] = mac
+
         _LOGGER.debug("OPNsense ARP entries: %d", len(out))
         return out
