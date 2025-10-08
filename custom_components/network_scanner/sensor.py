@@ -1,4 +1,6 @@
+# custom_components/network_scanner_extended/sensor.py
 from __future__ import annotations
+
 from typing import Any, Dict, Optional
 
 from homeassistant.components.sensor import SensorEntity
@@ -10,8 +12,13 @@ from .const import DOMAIN
 from .controller import ScanController
 
 
+def _get_phase(ctl: ScanController) -> str:
+    # Prefer public property if present, otherwise peek the private field.
+    return getattr(ctl, "phase", getattr(ctl, "_phase", "idle")) or "idle"
+
+
 class NetworkScannerExtendedSensor(SensorEntity):
-    """Device count + device list."""
+    """Primary entity: device count + full device list / metrics."""
 
     _attr_name = "Network Scanner Extended"
     _attr_native_unit_of_measurement = "Devices"
@@ -32,8 +39,10 @@ class NetworkScannerExtendedSensor(SensorEntity):
     @property
     def icon(self) -> str:
         st = (self._ctl.status or "idle").lower()
+        ph = _get_phase(self._ctl).lower()
         if st == "scanning":
-            return "mdi:radar"
+            # show 'enriching' distinctly if we're in the slow pass
+            return "mdi:progress-clock" if ph == "nmap" else "mdi:radar"
         if st == "error":
             return "mdi:alert-circle-outline"
         if st == "ok":
@@ -42,25 +51,27 @@ class NetworkScannerExtendedSensor(SensorEntity):
 
     @property
     def extra_state_attributes(self) -> Dict[str, Any]:
+        # Safe getattr fallbacks so sensor doesn't explode if controller evolves.
         return {
             "status": self._ctl.status,
-            "ip_ranges": self._ctl.cidrs,
-            "nmap_args": self._ctl.nmap_args,
-            "scan_interval": self._ctl.scan_interval,
-            "last_scan_started": self._ctl.last_scan_started,
-            "last_scan_finished": self._ctl.last_scan_finished,
-            "devices": self._ctl.devices,
-            "counts_by_segment": self._ctl.counts_by_segment,
-            "counts_by_source": self._ctl.counts_by_source,
+            "phase": _get_phase(self._ctl),  # idle | arp | nmap
+            "ip_ranges": list(getattr(self._ctl, "cidrs", [])),
+            "nmap_args": getattr(self._ctl, "nmap_args", ""),
+            "scan_interval": getattr(self._ctl, "scan_interval", 0),
+            "last_scan_started": getattr(self._ctl, "last_scan_started", None),
+            "last_scan_finished": getattr(self._ctl, "last_scan_finished", None),
+            "devices": list(getattr(self._ctl, "devices", [])),
+            "counts_by_segment": dict(getattr(self._ctl, "counts_by_segment", {})),
+            "counts_by_source": dict(getattr(self._ctl, "counts_by_source", {})),
         }
 
     async def async_update(self) -> None:
-        # Controller decides whether to auto-scan based on scan_interval (0 = manual).
+        # Controller decides whether to auto-scan based on scan_interval (0 = manual)
         await self._ctl.maybe_auto_scan()
 
 
 class NetworkScannerExtendedStatus(SensorEntity):
-    """Status-only mirror: idle/scanning/ok/error."""
+    """Secondary entity: status-only mirror + timing/metrics."""
 
     _attr_name = "Network Scanner Extended Status"
     _attr_should_poll = True
@@ -81,8 +92,9 @@ class NetworkScannerExtendedStatus(SensorEntity):
     @property
     def icon(self) -> str:
         st = (self._ctl.status or "idle").lower()
+        ph = _get_phase(self._ctl).lower()
         if st == "scanning":
-            return "mdi:radar"
+            return "mdi:progress-clock" if ph == "nmap" else "mdi:radar"
         if st == "error":
             return "mdi:alert-circle-outline"
         if st == "ok":
@@ -92,27 +104,30 @@ class NetworkScannerExtendedStatus(SensorEntity):
     @property
     def extra_state_attributes(self) -> Dict[str, Any]:
         return {
-            "last_scan_started": self._ctl.last_scan_started,
-            "last_scan_finished": self._ctl.last_scan_finished,
-            "scan_interval": self._ctl.scan_interval,
-            "ip_ranges": self._ctl.cidrs,
-            "nmap_args": self._ctl.nmap_args,
-            "device_count": self._ctl.device_count,
-            "counts_by_segment": self._ctl.counts_by_segment,
-            "counts_by_source": self._ctl.counts_by_source,
+            "phase": _get_phase(self._ctl),
+            "last_scan_started": getattr(self._ctl, "last_scan_started", None),
+            "last_scan_finished": getattr(self._ctl, "last_scan_finished", None),
+            "scan_interval": getattr(self._ctl, "scan_interval", 0),
+            "ip_ranges": list(getattr(self._ctl, "cidrs", [])),
+            "nmap_args": getattr(self._ctl, "nmap_args", ""),
+            "device_count": getattr(self._ctl, "device_count", 0),
+            "counts_by_segment": dict(getattr(self._ctl, "counts_by_segment", {})),
+            "counts_by_source": dict(getattr(self._ctl, "counts_by_source", {})),
         }
 
     async def async_update(self) -> None:
-        # Just reflects controller state; do not trigger scans here.
+        # Reflects controller state; do not trigger scans here
         return
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities) -> None:
+async def async_setup_entry(
+    hass: HomeAssistant, entry: ConfigEntry, async_add_entities
+) -> None:
     controller: ScanController = hass.data[DOMAIN][entry.entry_id]["controller"]
     async_add_entities(
         [
             NetworkScannerExtendedSensor(controller, entry),
             NetworkScannerExtendedStatus(controller, entry),
         ],
-        False,  # no immediate update; controller handles refresh/timing
+        False,  # controller handles refresh / timing
     )
