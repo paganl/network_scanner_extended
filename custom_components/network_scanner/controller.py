@@ -264,61 +264,61 @@ class ScanController:
 
     # ---------------- ARP (OPNsense) ----------------
 
-async def _fetch_arp_table_opnsense(self) -> Dict[str, str]:
-        """
-        POST /api/diagnostics/interface/search_arp (or trailing slash)
-        data: current=1&rowCount=9999&searchPhrase=&interface=<iface>
-        Auth: Basic <key:secret>
-        returns { ip -> MAC } (cleaned)
-        """
-        session = async_get_clientsession(self.hass)
-        auth = BasicAuth(self._opn_key, self._opn_sec)
-        base = f"{self._opn_url}/api/diagnostics/interface"
-        payload = {"current": 1, "rowCount": 9999, "searchPhrase": ""}
-        if self._opn_iface:
-            payload["interface"] = self._opn_iface
-
-        headers = {
-            "Accept": "application/json",
-            "X-Requested-With": "XMLHttpRequest",
-        }
-
-        urls = [f"{base}/search_arp", f"{base}/search_arp/"]
-        last_err: Optional[Exception] = None
-
-        for url in urls:
-            try:
-                async with session.post(
-                    url,
-                    auth=auth,
-                    data=payload,
-                    timeout=self._opn_timeout,
-                    ssl=False,  # self-signed default on OPNsense
-                    headers=headers,
-                ) as resp:
-                    txt = await resp.text()
-                    if resp.status >= 400:
-                        raise RuntimeError(f"HTTP {resp.status}: {txt[:200]!r}")
-
-                    # Try to parse JSON from text (even if content-type is odd)
-                    try:
-                        data = json.loads(txt)
-                    except Exception:
-                        short = txt[:180].replace("\n", " ")
-                        _LOGGER.warning(
-                            "OPNsense returned non-JSON from %s, first bytes=%r",
-                            url, short
-                        )
-                        return {}
-                    return self._parse_opnsense_arp(data)
-
-            except Exception as exc:
-                last_err = exc
-
-        if last_err:
-            # Don’t crash the whole scan; log once and continue without ARP data
-            _LOGGER.warning("OPNsense ARP fetch failed: %s", last_err)
-        return {}
+    async def _fetch_arp_table_opnsense(self) -> Dict[str, str]:
+            """
+            POST /api/diagnostics/interface/search_arp (or trailing slash)
+            data: current=1&rowCount=9999&searchPhrase=&interface=<iface>
+            Auth: Basic <key:secret>
+            returns { ip -> MAC } (cleaned)
+            """
+            session = async_get_clientsession(self.hass)
+            auth = BasicAuth(self._opn_key, self._opn_sec)
+            base = f"{self._opn_url}/api/diagnostics/interface"
+            payload = {"current": 1, "rowCount": 9999, "searchPhrase": ""}
+            if self._opn_iface:
+                payload["interface"] = self._opn_iface
+    
+            headers = {
+                "Accept": "application/json",
+                "X-Requested-With": "XMLHttpRequest",
+            }
+    
+            urls = [f"{base}/search_arp", f"{base}/search_arp/"]
+            last_err: Optional[Exception] = None
+    
+            for url in urls:
+                try:
+                    async with session.post(
+                        url,
+                        auth=auth,
+                        data=payload,
+                        timeout=self._opn_timeout,
+                        ssl=False,  # self-signed default on OPNsense
+                        headers=headers,
+                    ) as resp:
+                        txt = await resp.text()
+                        if resp.status >= 400:
+                            raise RuntimeError(f"HTTP {resp.status}: {txt[:200]!r}")
+    
+                        # Try to parse JSON from text (even if content-type is odd)
+                        try:
+                            data = json.loads(txt)
+                        except Exception:
+                            short = txt[:180].replace("\n", " ")
+                            _LOGGER.warning(
+                                "OPNsense returned non-JSON from %s, first bytes=%r",
+                                url, short
+                            )
+                            return {}
+                        return self._parse_opnsense_arp(data)
+    
+                except Exception as exc:
+                    last_err = exc
+    
+            if last_err:
+                # Don’t crash the whole scan; log once and continue without ARP data
+                _LOGGER.warning("OPNsense ARP fetch failed: %s", last_err)
+            return {}
 
     def _parse_opnsense_arp(self, data: Any) -> Dict[str, str]:
         """
