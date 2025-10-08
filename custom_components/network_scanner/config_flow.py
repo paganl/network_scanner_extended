@@ -15,6 +15,11 @@ from .const import (
     DEFAULT_IP_RANGE,
     DEFAULT_SCAN_INTERVAL,   # seconds
     DEFAULT_NMAP_ARGS,
+    # ARP provider bits
+    CONF_ARP_PROVIDER,
+    ARP_PROVIDERS,
+    DEFAULT_ARP_PROVIDER,
+    # OPNsense
     DEFAULT_OPNSENSE_URL,
     DEFAULT_OPNSENSE_IFACE,
 )
@@ -130,6 +135,12 @@ class NetworkScannerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 description={"suggested_value": current_mins},
             ): MinutesNumberSelector(),
 
+            # ARP provider (none/opnsense)
+            vol.Optional(
+                CONF_ARP_PROVIDER,
+                description={"suggested_value": DEFAULT_ARP_PROVIDER},
+            ): vol.In(ARP_PROVIDERS),
+
             # OPNsense (optional)
             vol.Optional("opnsense_url",
                 description={"suggested_value": DEFAULT_OPNSENSE_URL}): str,
@@ -185,14 +196,18 @@ class NetworkScannerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return self.async_show_form(step_id="user", data_schema=schema, errors=errors)
 
         directory = _build_dir(jtxt)
-
         scan_secs = _minutes_to_secs(mins, DEFAULT_SCAN_INTERVAL)
+
         data = {
             "ip_range": ipr,
             "nmap_args": (user_input.get("nmap_args") or DEFAULT_NMAP_ARGS).strip(),
             "scan_interval": scan_secs,  # seconds (0 disables auto)
             "mac_directory": directory,
             "mac_directory_json_url": (user_input.get("mac_directory_json_url") or "").strip(),
+
+            # ARP provider
+            CONF_ARP_PROVIDER: user_input.get(CONF_ARP_PROVIDER, DEFAULT_ARP_PROVIDER),
+
             # OPNsense
             "opnsense_url": opn_url,
             "opnsense_key": opn_key,
@@ -230,6 +245,12 @@ class NetworkScannerOptionsFlow(config_entries.OptionsFlow):
                 "scan_interval_minutes",
                 description={"suggested_value": saved_mins},
             ): MinutesNumberSelector(),
+
+            # ARP provider (ensure it appears in options too)
+            vol.Optional(
+                CONF_ARP_PROVIDER,
+                description={"suggested_value": opts.get(CONF_ARP_PROVIDER, data.get(CONF_ARP_PROVIDER, DEFAULT_ARP_PROVIDER))},
+            ): vol.In(ARP_PROVIDERS),
 
             # OPNsense
             vol.Optional("opnsense_url",
@@ -289,10 +310,16 @@ class NetworkScannerOptionsFlow(config_entries.OptionsFlow):
             return self.async_show_form(step_id="user", data_schema=schema, errors=errors)
 
         scan_secs = _minutes_to_secs(mins, DEFAULT_SCAN_INTERVAL)
+
         return self.async_create_entry(title="", data={
             "ip_range": ipr,
             "nmap_args": (user_input.get("nmap_args") or DEFAULT_NMAP_ARGS).strip(),
             "scan_interval": scan_secs,  # seconds; 0 disables auto-scan
+            # persist provider in OPTIONS too
+            CONF_ARP_PROVIDER: user_input.get(
+                CONF_ARP_PROVIDER,
+                opts.get(CONF_ARP_PROVIDER, data.get(CONF_ARP_PROVIDER, DEFAULT_ARP_PROVIDER)),
+            ),
             "mac_directory_json_text": jtxt,
             "mac_directory_json_url": (user_input.get("mac_directory_json_url") or "").strip(),
             "opnsense_url": opn_url,
