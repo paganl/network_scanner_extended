@@ -1,14 +1,14 @@
 # custom_components/network_scanner/controller.py
 from __future__ import annotations
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import json
 import logging
 import re
 from datetime import datetime, timezone
+from ipaddress import ip_address, ip_network
 
 import nmap
 from aiohttp import ClientError, ClientTimeout, BasicAuth
-from yarl import URL
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -24,21 +24,21 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
+# ---------------- small helpers ----------------
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
+def _norm(s: Optional[str]) -> str:
+    return (s or "").strip()
 
 def _norm_mac(s: Optional[str]) -> str:
     return (s or "").upper()
 
-
 _MAC_RE = re.compile(r"^[0-9A-F]{2}(:[0-9A-F]{2}){5}$")
-
 
 def _valid_mac(mac: str) -> bool:
     return bool(_MAC_RE.match(mac))
-
 
 def _clean_mac(s: Optional[str]) -> str:
     """
@@ -51,13 +51,14 @@ def _clean_mac(s: Optional[str]) -> str:
         return ""
     return m if _valid_mac(m) else ""
 
-
 def _ip_sort_key(ip_str: str) -> List[int]:
     try:
         return [int(p) for p in ip_str.split(".")]
     except Exception:
         return [999, 999, 999, 999]
 
+def _split_list(s: str) -> List[str]:
+    return [p.strip() for p in (s or "").replace(",", " ").split() if p.strip()]
 
 def _parse_dir_obj(obj: Any) -> Dict[str, Dict[str, str]]:
     out: Dict[str, Dict[str, str]] = {}
@@ -76,11 +77,12 @@ def _parse_dir_obj(obj: Any) -> Dict[str, Dict[str, str]]:
             out[mk] = {"name": str(v), "desc": ""}
     return out
 
+# ---------------- controller ----------------
 
 class ScanController:
     """
-    Unifies all sources (nmap + optional ARP) into a single, consistent
-    device list and applies directory enrichment by MAC.
+    Unifies all sources (nmap + optional OPNsense ARP) into one consistent list,
+    filters strictly to configured CIDRs, and applies directory enrichment by MAC.
     """
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
@@ -96,8 +98,13 @@ class ScanController:
         self._last_scan_finished: Optional[str] = None
         self._is_scanning: bool = False
 
+        # rollups
+        self._counts_by_segment: Dict[str, int] = {}
+        self._counts_by_source: Dict[str, int] = {}
+
         # config-derived
         self._cidrs: List[str] = []
+        self._networks: List = []  # ip_network objects
         self._nmap_args: str = DEFAULT_NMAP_ARGS
         self._scan_interval: int = DEFAULT_SCAN_INTERVAL  # seconds
         self._arp_provider: str = ARP_PROVIDER_NONE
@@ -106,8 +113,8 @@ class ScanController:
         self._opn_url: str = ""
         self._opn_key: str = ""
         self._opn_sec: str = ""
-        self._opn_iface: str = ""
-        self._opn_timeout = ClientTimeout(total=10)
+        self._opn_ifaces: List[str] = []
+        self._opn_timeout = ClientTimeout(total=15)
 
         self.apply_entry(entry)
 
@@ -145,6 +152,14 @@ class ScanController:
     def scan_interval(self) -> int:
         return self._scan_interval
 
+    @property
+    def counts_by_segment(self) -> Dict[str, int]:
+        return self._counts_by_segment
+
+    @property
+    def counts_by_source(self) -> Dict[str, int]:
+        return self._counts_by_source
+
     # ---------------- config handling ----------------
 
     def apply_entry(self, entry: ConfigEntry) -> None:
@@ -153,30 +168,35 @@ class ScanController:
         opts = entry.options or {}
 
         raw = (opts.get("ip_range") or data.get("ip_range") or "").strip()
-        self._cidrs = [p.strip() for p in raw.replace(",", " ").split() if p.strip()]
+        self._cidrs = _split_list(raw)
+        self._networks = []
+        for c in self._cidrs:
+            try:
+                self._networks.append(ip_network(c, strict=False))
+            except Exception:
+                _LOGGER.warning("Ignoring invalid CIDR in ip_range: %s", c)
 
         self._nmap_args = (opts.get("nmap_args") or data.get("nmap_args") or DEFAULT_NMAP_ARGS).strip()
         self._scan_interval = int(opts.get("scan_interval", data.get("scan_interval", DEFAULT_SCAN_INTERVAL)))
         self._arp_provider = (opts.get(CONF_ARP_PROVIDER) or data.get(CONF_ARP_PROVIDER) or ARP_PROVIDER_NONE).strip()
 
-        self._opn_url = (opts.get("opnsense_url") or data.get("opnsense_url") or "").strip().rstrip("/")
-        self._opn_key = (opts.get("opnsense_key") or data.get("opnsense_key") or "").strip()
-        self._opn_sec = (opts.get("opnsense_secret") or data.get("opnsense_secret") or "").strip()
-        self._opn_iface = (opts.get("opnsense_interface") or data.get("opnsense_interface") or "").strip()
+        self._opn_url = _norm((opts.get("opnsense_url") or data.get("opnsense_url") or "")).rstrip("/")
+        self._opn_key = _norm(opts.get("opnsense_key") or data.get("opnsense_key") or "")
+        self._opn_sec = _norm(opts.get("opnsense_secret") or data.get("opnsense_secret") or "")
+        self._opn_ifaces = _split_list(opts.get("opnsense_interface") or data.get("opnsense_interface") or "")
 
     # ---------------- scheduling ----------------
 
     async def maybe_auto_scan(self) -> None:
         if self._is_scanning or self._scan_interval <= 0:
             return
-        # HA calls us often; gate by interval using last finished timestamp
+        # gate by interval using last finished timestamp
+        last = 0.0
         if self._last_scan_finished:
             try:
                 last = datetime.fromisoformat(self._last_scan_finished.replace("Z", "+00:00")).timestamp()
             except Exception:
                 last = 0.0
-        else:
-            last = 0.0
         now = datetime.now(timezone.utc).timestamp()
         if now - last < self._scan_interval:
             return
@@ -193,6 +213,7 @@ class ScanController:
             devices.sort(key=lambda d: _ip_sort_key(d.get("ip", "")))
             self._devices = devices
             self._device_count = len(devices)
+            self._recompute_rollups()
             self._status = "ok"
         except Exception as exc:
             _LOGGER.exception("Scan failed: %s", exc)
@@ -206,25 +227,27 @@ class ScanController:
     async def _do_full_scan(self) -> List[Dict[str, Any]]:
         directory = await self._build_effective_directory()
 
-        # nmap per CIDR
+        # nmap per CIDR (inside executor)
         nmap_map: Dict[str, Dict[str, Any]] = {}
         for cidr in self._cidrs:
             chunk = await self.hass.async_add_executor_job(self._scan_cidr_nmap, cidr, self._nmap_args)
             for ip, dev in chunk.items():
-                if ip not in nmap_map:
+                if self._ip_in_scope(ip) and ip not in nmap_map:
                     nmap_map[ip] = dev
 
-        # ARP
+        # ARP (OPNsense)
         arp_map: Dict[str, Dict[str, Any]] = {}
         if self._arp_provider == ARP_PROVIDER_OPNSENSE and self._opn_url and self._opn_key and self._opn_sec:
             try:
                 arp_map = await self._fetch_arp_table_opnsense()
+                # filter ARP strictly to scope (and optional interfaces if provided)
+                arp_map = self._filter_arp_scope(arp_map)
             except Exception as exc:
                 _LOGGER.warning("OPNsense ARP fetch failed: %s", exc)
 
         merged = self._merge_nmap_arp(nmap_map, arp_map)
 
-        # enrichment
+        # enrichment by MAC
         self._apply_directory_overrides(merged, directory)
 
         return list(merged.values())
@@ -252,14 +275,12 @@ class ScanController:
                 hostname = node.hostname() or ""
                 out[ip] = {
                     "ip": ip,
-                    "mac": mac,             # cleaned; may be ""
+                    "mac": mac,             # may be ""
                     "vendor": vendor,
                     "hostname": hostname,
                     "source": ["nmap"],
                     "name": "",
                     "type": "",
-                    # optional extras filled later if ARP gives them
-                    # "interface": "", "segment": ""
                 }
             except Exception as exc:
                 _LOGGER.debug("nmap parse skip host %s: %s", host, exc)
@@ -267,151 +288,107 @@ class ScanController:
 
     # ---------------- ARP (OPNsense) ----------------
 
-    def _opn_candidate_urls(self) -> list[str]:
+    async def _fetch_arp_table_opnsense(self) -> Dict[str, Dict[str, Any]]:
         """
-        Build a robust list of candidate endpoints:
-        - Prefer HTTPS even if the user typed http:// (OPNsense commonly forces TLS).
-        - Try with and without trailing slash.
-        """
-        base = (self._opn_url or "").strip().rstrip("/")
-        if not base:
-            return []
-
-        # Prefer https even if http was configured
-        bases = []
-        if base.startswith("http://"):
-            bases.append("https://" + base[len("http://"):])
-            bases.append(base)  # try the configured http last
-        else:
-            bases.append(base)
-
-        urls = []
-        for b in bases:
-            urls.append(f"{b}/api/diagnostics/interface/search_arp")
-            urls.append(f"{b}/api/diagnostics/interface/search_arp/")
-        return urls
-
-    async def _opn_post_json(self, url: str, payload: dict, *, allow_redirect: bool = True) -> dict:
-        """
-        POST url with form data; return parsed JSON.
-        - No auto-redirect; if a 30x appears we manually follow once so we can
-          re-send BasicAuth (aiohttp drops auth across scheme/host changes).
+        Returns dict: { ip: { mac, intf, intf_description, expired, expires, permanent, arp_type, manufacturer, hostname } }
+        Uses /api/diagnostics/interface/search_arp (with optional ?interface=IFACE via POST form).
         """
         session = async_get_clientsession(self.hass)
         auth = BasicAuth(self._opn_key, self._opn_sec)
+        base = f"{self._opn_url}/api/diagnostics/interface"
         headers = {
             "Accept": "application/json",
             "X-Requested-With": "XMLHttpRequest",
         }
 
-        async with session.post(
-            url,
-            auth=auth,
-            data=payload,
-            timeout=self._opn_timeout,
-            ssl=False,                 # OPNsense’s default self-signed cert
-            headers=headers,
-            allow_redirects=False,     # handle redirects ourselves
-        ) as resp:
-            # Handle a single redirect hop
-            if 300 <= resp.status < 400 and allow_redirect:
-                loc = resp.headers.get("Location") or resp.headers.get("location")
-                if loc:
-                    # Build absolute URL if relative
-                    if loc.startswith("/"):
-                        u = URL(url)
-                        next_url = f"{u.scheme}://{u.host}{loc}"
-                    else:
-                        next_url = loc
-                    _LOGGER.debug("OPNsense redirect %s -> %s (status %s)", url, next_url, resp.status)
-                    return await self._opn_post_json(next_url, payload, allow_redirect=False)
+        rows: List[dict] = []
 
-            text = await resp.text()
-            if resp.status >= 400:
-                raise RuntimeError(f"HTTP {resp.status} from {url}: {text[:200]!r}")
+        if self._opn_ifaces:
+            # Query per interface to keep payloads small
+            for iface in self._opn_ifaces:
+                payload = {"current": 1, "rowCount": 9999, "searchPhrase": "", "interface": iface}
+                for path in ("search_arp", "search_arp/"):
+                    url = f"{base}/{path}"
+                    try:
+                        async with session.post(url, auth=auth, data=payload, timeout=self._opn_timeout, ssl=False, headers=headers) as resp:
+                            txt = await resp.text()
+                            if resp.status >= 400:
+                                raise RuntimeError(f"HTTP {resp.status}: {txt[:200]!r}")
+                            data = json.loads(txt)
+                            part = self._extract_rows_from_arp_json(data)
+                            if part:
+                                rows.extend(part)
+                                break
+                    except Exception as exc:
+                        _LOGGER.debug("OPNsense ARP iface %s via %s failed: %s", iface, url, exc)
+        else:
+            # Single fetch (all interfaces), then we filter locally
+            payload = {"current": 1, "rowCount": 9999, "searchPhrase": ""}
+            for path in ("search_arp", "search_arp/"):
+                url = f"{base}/{path}"
+                try:
+                    async with session.post(url, auth=auth, data=payload, timeout=self._opn_timeout, ssl=False, headers=headers) as resp:
+                        txt = await resp.text()
+                        if resp.status >= 400:
+                            raise RuntimeError(f"HTTP {resp.status}: {txt[:200]!r}")
+                        data = json.loads(txt)
+                        rows = self._extract_rows_from_arp_json(data)
+                        break
+                except Exception as exc:
+                    _LOGGER.debug("OPNsense ARP fetch via %s failed: %s", url, exc)
 
-            # Try JSON parse
-            try:
-                return json.loads(text)
-            except Exception:
-                short = text[:180].replace("\n", " ")
-                _LOGGER.warning(
-                    "OPNsense returned non-JSON from %s, first bytes=%r",
-                    url, short
-                )
-                raise ValueError("non-json")
-
-    async def _fetch_arp_table_opnsense(self) -> Dict[str, Dict[str, Any]]:
-        """
-        POST /api/diagnostics/interface/search_arp (or trailing slash)
-        form data: current=1&rowCount=9999&searchPhrase=&interface=<iface>
-        Auth: Basic <key:secret>
-        returns { ip -> {mac, hostname, manufacturer, interface, segment, expired, expires, permanent, type} }
-        """
-        payload = {"current": 1, "rowCount": 9999, "searchPhrase": ""}
-        if self._opn_iface:
-            payload["interface"] = self._opn_iface
-
-        last_err: Optional[Exception] = None
-        for url in self._opn_candidate_urls():
-            try:
-                data = await self._opn_post_json(url, payload)
-                return self._parse_opnsense_arp(data)
-            except Exception as exc:
-                last_err = exc
-
-        if last_err:
-            _LOGGER.warning("OPNsense ARP fetch failed: %s", last_err)
-        return {}
-
-    def _parse_opnsense_arp(self, data: Any) -> Dict[str, Dict[str, Any]]:
-        """
-        Expect payload like:
-          {"total":55,"rowCount":55,"current":1,
-           "rows":[{"mac":"..","ip":"..","hostname":"..","manufacturer":"..",
-                    "intf":"vlan0.2","intf_description":"IoT", ...}, ...]}
-        Return mapping by IP with cleaned MAC and useful extras.
-        """
-        def clean_row(r: dict) -> Optional[Dict[str, Any]]:
-            if not isinstance(r, dict):
-                return None
-            ip = r.get("ip") or r.get("address") or r.get("inet") or r.get("Addr")
+        out: Dict[str, Dict[str, Any]] = {}
+        for r in rows or []:
+            ip = _norm(r.get("ip") or r.get("address") or r.get("inet") or r.get("Addr"))
             mac = _clean_mac(r.get("mac") or r.get("lladdr") or r.get("hwaddr") or r.get("MAC"))
             if not ip:
-                return None
-            return {
-                "mac": mac or "",
-                "hostname": str(r.get("hostname") or ""),
-                "manufacturer": str(r.get("manufacturer") or ""),
-                "interface": str(r.get("intf") or ""),
-                "segment": str(r.get("intf_description") or ""),
+                continue
+            out[ip] = {
+                "mac": mac,
+                "intf": r.get("intf") or "",
+                "intf_description": r.get("intf_description") or "",
                 "expired": bool(r.get("expired", False)),
                 "expires": r.get("expires"),
                 "permanent": bool(r.get("permanent", False)),
-                "arp_type": str(r.get("type") or ""),
+                "arp_type": r.get("type") or "",
+                "manufacturer": r.get("manufacturer") or "",
+                "hostname": r.get("hostname") or "",
             }
-
-        rows: List[dict] = []
-        if isinstance(data, dict):
-            if isinstance(data.get("rows"), list):
-                rows = data["rows"]
-            else:
-                # Some variants may wrap differently
-                for v in data.values():
-                    if isinstance(v, list) and v and isinstance(v[0], dict):
-                        rows = v
-                        break
-        elif isinstance(data, list) and data and isinstance(data[0], dict):
-            rows = data
-
-        out: Dict[str, Dict[str, Any]] = {}
-        for r in rows:
-            cleaned = clean_row(r)
-            if not cleaned:
-                continue
-            ip = r.get("ip") or r.get("address") or r.get("inet") or r.get("Addr")
-            out[str(ip)] = cleaned
         return out
+
+    @staticmethod
+    def _extract_rows_from_arp_json(data: Any) -> List[dict]:
+        if isinstance(data, dict) and isinstance(data.get("rows"), list):
+            return data["rows"]
+        # fallback tolerant shapes
+        if isinstance(data, dict):
+            for v in data.values():
+                if isinstance(v, list) and v and isinstance(v[0], dict):
+                    return v
+        if isinstance(data, list) and data and isinstance(data[0], dict):
+            return data
+        return []
+
+    # ---------------- filtering ----------------
+
+    def _ip_in_scope(self, ip_str: str) -> bool:
+        if not self._networks:
+            return False
+        try:
+            ip_obj = ip_address(ip_str)
+        except Exception:
+            return False
+        return any(ip_obj in net for net in self._networks)
+
+    def _filter_arp_scope(self, arp_map: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        if not arp_map:
+            return {}
+        # First filter by CIDRs
+        scoped = {ip: r for ip, r in arp_map.items() if self._ip_in_scope(ip)}
+        if not self._opn_ifaces:
+            return scoped
+        allowed = set(self._opn_ifaces)
+        return {ip: r for ip, r in scoped.items() if _norm(r.get("intf")) in allowed}
 
     # ---------------- merge + enrichment ----------------
 
@@ -421,62 +398,78 @@ class ScanController:
         arp_map: Dict[str, Dict[str, Any]],
     ) -> Dict[str, Dict[str, Any]]:
         """
-        - Union of IPs from both sources.
+        - Union of IPs from both sources, **then filter by scope**.
         - Fill missing/invalid MACs from ARP (only if valid).
-        - Prefer nmap vendor/hostname when present; else fallback to ARP manufacturer/hostname.
-        - Attach interface and segment (VLAN label) from ARP when available.
-        - For ARP-only IPs, create a minimal device entry (still includes consistent keys).
+        - For ARP-only IPs (still within scope), create an entry.
+        - Add ARP interface/segment/manufacturer/hostname where helpful.
         """
-        out: Dict[str, Dict[str, Any]] = {}
         all_ips = set(nmap_map.keys()) | set(arp_map.keys())
+        out: Dict[str, Dict[str, Any]] = {}
 
         for ip in all_ips:
-            base = dict(nmap_map.get(ip, {}))  # copy
-            arp = arp_map.get(ip, {})
+            if not self._ip_in_scope(ip):
+                continue
 
-            # Start device with consistent keys
-            dev = {
-                "ip": ip,
-                "mac": _clean_mac(base.get("mac", "")) or _clean_mac(arp.get("mac", "")),
-                "vendor": base.get("vendor") or "",  # resolve below
-                "hostname": base.get("hostname") or "",  # resolve below
-                "name": base.get("name") or "",
-                "type": base.get("type") or "",
-                "source": list(set(base.get("source", [])) or set()),
-            }
+            n = nmap_map.get(ip)
+            a = arp_map.get(ip)
 
-            # Source labels
-            if base:
-                dev["source"] = sorted(set(dev["source"]) | {"nmap"})
-            if arp:
-                dev["source"] = sorted(set(dev["source"]) | {"arp"})
+            if n:
+                dev = dict(n)
+                cur_mac = _clean_mac(dev.get("mac", ""))
+                mac_from_arp = _clean_mac(a.get("mac") if a else "")
+                if not cur_mac and mac_from_arp:
+                    dev["mac"] = mac_from_arp
+                elif cur_mac and not _valid_mac(cur_mac):
+                    dev["mac"] = mac_from_arp or ""
 
-            # Vendor/hostname fallback from ARP
-            if not dev["vendor"] or dev["vendor"] == "Unknown":
-                manu = arp.get("manufacturer") or ""
-                dev["vendor"] = manu or (dev["vendor"] or "Unknown")
-            if not dev["hostname"]:
-                dev["hostname"] = arp.get("hostname") or ""
+                # prefer existing vendor/hostname; fill from ARP if missing
+                if a:
+                    if dev.get("vendor", "Unknown") == "Unknown":
+                        mfr = _norm(a.get("manufacturer"))
+                        if mfr:
+                            dev["vendor"] = mfr
+                    if not _norm(dev.get("hostname")):
+                        ahost = _norm(a.get("hostname"))
+                        if ahost:
+                            dev["hostname"] = ahost
 
-            # Extra ARP metadata
-            if arp:
-                if arp.get("interface"):
-                    dev["interface"] = arp["interface"]
-                if arp.get("segment"):
-                    dev["segment"] = arp["segment"]
-                # Optional raw ARP details
-                dev["arp_meta"] = {
-                    "expired": bool(arp.get("expired", False)),
-                    "expires": arp.get("expires"),
-                    "permanent": bool(arp.get("permanent", False)),
-                    "arp_type": arp.get("arp_type") or "",
+                    # capture interface/segment and ARP meta
+                    dev["interface"] = a.get("intf") or dev.get("interface", "")
+                    dev["segment"] = a.get("intf_description") or dev.get("segment", "")
+                    dev["arp_meta"] = {
+                        "expired": a.get("expired", False),
+                        "expires": a.get("expires"),
+                        "permanent": a.get("permanent", False),
+                        "arp_type": a.get("arp_type") or "",
+                    }
+
+                src = set(dev.get("source", []))
+                src.add("nmap")
+                if a:
+                    src.add("arp")
+                dev["source"] = sorted(src)
+
+            else:
+                # ARP-only (still in-scope)
+                mac_from_arp = _clean_mac(a.get("mac") if a else "")
+                dev = {
+                    "ip": ip,
+                    "mac": mac_from_arp or "",
+                    "vendor": (a.get("manufacturer") or "Unknown") if a else "Unknown",
+                    "hostname": a.get("hostname") or "" if a else "",
+                    "source": ["arp"],
+                    "name": "",
+                    "type": "",
                 }
-
-            # Ensure vendor at least "Unknown"
-            dev["vendor"] = dev["vendor"] or "Unknown"
-            # Ensure name/type defaults even without directory enrichment
-            dev["name"] = dev["name"] or "Unknown Device"
-            dev["type"] = dev["type"] or "Unknown Device"
+                if a:
+                    dev["interface"] = a.get("intf") or ""
+                    dev["segment"] = a.get("intf_description") or ""
+                    dev["arp_meta"] = {
+                        "expired": a.get("expired", False),
+                        "expires": a.get("expires"),
+                        "permanent": a.get("permanent", False),
+                        "arp_type": a.get("arp_type") or "",
+                    }
 
             out[ip] = dev
 
@@ -486,28 +479,48 @@ class ScanController:
         for dev in by_ip.values():
             mac = _clean_mac(dev.get("mac", ""))
             override = directory.get(mac, {}) if mac else {}
-            # Only override name/type if directory provides values
-            if override.get("name"):
-                dev["name"] = override["name"]
-            if override.get("desc"):
-                dev["type"] = override["desc"]
+            dev["name"] = override.get("name") or dev.get("name") or "Unknown Device"
+            dev["type"] = override.get("desc") or dev.get("type") or "Unknown Device"
+
+    def _recompute_rollups(self) -> None:
+        by_seg: Dict[str, int] = {}
+        by_src: Dict[str, int] = {"nmap": 0, "arp": 0, "both": 0}
+        for d in self._devices:
+            seg = _norm(d.get("segment") or "Unsegmented")
+            by_seg[seg] = by_seg.get(seg, 0) + 1
+            src = d.get("source") or []
+            key = "both" if ("nmap" in src and "arp" in src) else ("nmap" if "nmap" in src else "arp")
+            by_src[key] = by_src.get(key, 0) + 1
+        self._counts_by_segment = dict(sorted(by_seg.items()))
+        self._counts_by_source = by_src
 
     # ---------------- directory building ----------------
 
     async def _build_effective_directory(self) -> Dict[str, Dict[str, str]]:
-        out: Dict[str, Dict[str, str]] = dict(self._entry.data.get("mac_directory", {}))
-        # keys may not be cleaned yet
-        out = { _clean_mac(k): {"name": v.get("name",""), "desc": v.get("desc","")} for k, v in out.items() if _clean_mac(k) }
+        out: Dict[str, Dict[str, str]] = {}
+        # entry data (pre-parsed on save)
+        base = self._entry.data.get("mac_directory", {})
+        if isinstance(base, dict):
+            for k, v in base.items():
+                mk = _clean_mac(k)
+                if not mk:
+                    continue
+                if isinstance(v, dict):
+                    out[mk] = {"name": _norm(v.get("name")), "desc": _norm(v.get("desc"))}
+                else:
+                    out[mk] = {"name": str(v), "desc": ""}
 
+        # options JSON text (highest precedence)
         opts = self._entry.options or {}
-        jtxt = (opts.get("mac_directory_json_text") or "").strip()
+        jtxt = _norm(opts.get("mac_directory_json_text"))
         if jtxt:
             try:
                 out.update(_parse_dir_obj(json.loads(jtxt)))
             except Exception as exc:
                 _LOGGER.warning("Invalid directory JSON (options): %s", exc)
 
-        url = (opts.get("mac_directory_json_url") or self._entry.data.get("mac_directory_json_url") or "").strip()
+        # JSON URL
+        url = _norm(opts.get("mac_directory_json_url") or self._entry.data.get("mac_directory_json_url"))
         if url:
             try:
                 session = async_get_clientsession(self.hass)
@@ -516,4 +529,5 @@ class ScanController:
                     out.update(_parse_dir_obj(json.loads(await resp.text())))
             except (ClientError, Exception) as exc:
                 _LOGGER.warning("Failed to fetch directory URL %s: %s", url, exc)
+
         return out
