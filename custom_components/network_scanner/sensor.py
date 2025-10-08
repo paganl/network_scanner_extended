@@ -50,6 +50,8 @@ class NetworkScannerExtendedSensor(SensorEntity):
             "last_scan_started": self._ctl.last_scan_started,
             "last_scan_finished": self._ctl.last_scan_finished,
             "devices": self._ctl.devices,
+            "counts_by_segment": self._ctl.counts_by_segment,
+            "counts_by_source": self._ctl.counts_by_source,
         }
 
     async def async_update(self) -> None:
