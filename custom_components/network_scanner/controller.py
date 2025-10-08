@@ -175,6 +175,12 @@ class ScanController:
     @property
     def scan_interval(self) -> int:
         return self._scan_interval
+    
+    @property
+    def phase(self) -> str:
+        # idle | arp | nmap
+        return self._phase
+
 
     # ---------------- config handling ----------------
 
