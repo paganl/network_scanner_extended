@@ -22,6 +22,7 @@ ARP_PROVIDER_NONE     = "none"
 ARP_PROVIDER_OPNSENSE = "opnsense"
 ARP_PROVIDERS = [ARP_PROVIDER_NONE, ARP_PROVIDER_OPNSENSE]
 
+DEFAULT_ARP_PROVIDER = ARP_PROVIDER_NONE
 DEFAULT_OPNSENSE_URL = "http://10.0.0.2"
 DEFAULT_OPNSENSE_IFACE = ""      # optional (e.g. "lan", "vlan30")
 OPNSENSE_ARP_PATH = "/api/diagnostics/interface/search_arp/"
