@@ -98,6 +98,8 @@ class NetworkScannerExtendedStatus(SensorEntity):
             "ip_ranges": self._ctl.cidrs,
             "nmap_args": self._ctl.nmap_args,
             "device_count": self._ctl.device_count,
+            "counts_by_segment": self._ctl.counts_by_segment,
+            "counts_by_source": self._ctl.counts_by_source,
         }
 
     async def async_update(self) -> None:
