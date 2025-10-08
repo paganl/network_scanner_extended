@@ -20,6 +20,7 @@ CONF_ARP_VERIFY_TLS = "arp_verify_tls"
 
 ARP_PROVIDER_NONE     = "none"
 ARP_PROVIDER_OPNSENSE = "opnsense"
+ARP_PROVIDERS = [ARP_PROVIDER_NONE, ARP_PROVIDER_OPNSENSE]
 
 DEFAULT_OPNSENSE_URL = "http://10.0.0.2"
 DEFAULT_OPNSENSE_IFACE = ""      # optional (e.g. "lan", "vlan30")
