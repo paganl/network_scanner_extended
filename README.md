@@ -1,141 +1,191 @@
-# Home Assistant Network Scanner Integration
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Virgin Modem Status – Home Assistant Integration</title>
+</head>
+<body>
+  <h1>Virgin Modem Status (Unofficial)</h1>
 
-This Home Assistant integration provides a network scanner that identifies all devices on your local network. Utilizing the provided IP range and MAC address mappings, it gives each identified device a user-friendly name and manufacturer information.
+  <p>
+    A lightweight custom integration for Home Assistant that polls the Virgin Media modem
+    (e.g. Hub in Modem Mode) at <code>http://192.168.100.1</code> and exposes:
+  </p>
+  <ul>
+    <li><strong>binary_sensor.virgin_modem_online</strong> — modem UI reachable (HTTP 200).</li>
+    <li><strong>sensor.virgin_last_docsis_event</strong> — most recent DOCSIS log/event text, with full
+        message/time maps in attributes for automation.</li>
+  </ul>
 
-## Features
+  <p>
+    This readme explains installation, setup, network/VLAN/ARP considerations, entity mapping, and troubleshooting.
+  </p>
 
-- Scans the local network based on a user-defined IP range.
-- Uses user-provided MAC address-to-device mapping for easy identification.
-- Supports multiple IP ranges from different subnets.
-- Automatically updates the list of devices on a periodic basis.
-- Displays the total number of devices currently identified on the network.
+  <hr>
 
-## Installation through HACS
+  <h2>Requirements</h2>
+  <ul>
+    <li>Home Assistant 2023.6+ (HA OS / Container / Core).</li>
+    <li>Virgin Media modem in <em>Modem Mode</em> (UI reachable on <code>192.168.100.1</code>).</li>
+    <li>Home Assistant must be able to reach <code>192.168.100.1</code> from its network namespace.</li>
+    <li>OPNsense or similar firewall if you are multi-homed or using VLANs.</li>
+  </ul>
 
-To install the network_scanner integration using HACS:
+  <hr>
 
-1. Open Home Assistant, go to **HACS > Integrations**.
-2. Search for **Network Scanner** and install it.
-3. After installation, add the necessary configuration to your `configuration.yaml` (see below).
-4. Restart Home Assistant.
+  <h2>Installation</h2>
 
-## Manual Installation
+  <h3>Via HACS (Preferred if you later add it to a repo index)</h3>
+  <ol>
+    <li>HACS → Integrations → Three dots → <em>Custom repositories</em> → Add your GitHub repo URL → Category: <em>Integration</em>.</li>
+    <li>Search for “Virgin Modem Status”, install, and restart Home Assistant.</li>
+  </ol>
 
-To install this integration manually:
+  <h3>Manual</h3>
+  <ol>
+    <li>Copy the folder <code>custom_components/virgin_modem_status</code> into your HA config directory.</li>
+    <li>Restart Home Assistant.</li>
+  </ol>
 
-1. Copy the `network_scanner` directory into the `custom_components` directory of your Home Assistant installation.
-2. Add the configuration to your `configuration.yaml`.
-3. Restart Home Assistant.
+  <hr>
 
-## Configuration
+  <h2>Configuration (UI)</h2>
+  <ol>
+    <li>Settings → Devices &amp; Services → <em>+ Add Integration</em> → search “Virgin Modem Status”.</li>
+    <li>Host: <code>http://192.168.100.1</code> (leave default unless your modem UI lives elsewhere).</li>
+    <li>Scan interval (seconds): default <code>60</code>. You can change later in the integration’s <em>Options</em>.</li>
+  </ol>
 
-### Option 1: Through Home Assistant UI
+  <p>
+    After a successful first refresh, you will see a <em>Device</em> named “Virgin Modem” with the two entities.
+  </p>
 
-1. Navigate to **Configuration > Integrations**.
-2. Click the **+ Add Integration** button.
-3. Search for **Network Scanner** and select it.
-4. Enter the desired IP range for the network scan, e.g., `192.168.1.1-254` or use the CIDR notation like `192.168.1.0/24`.
-5. Optionally, provide MAC address to device mapping in the format in `configuration.yaml`:
-   - MAC address (e.g., `bc:14:14:f1:81:1b`)
-   - Friendly name (e.g., `Brother Printer`)
-   - Manufacturer (e.g., `Cloud Network Technology Singapore Pte. Ltd.`)
-6. Separate each field with a semi-colon and each mapping entry with a newline.
+  <hr>
 
-Example of entries in the config flow input fields:
+  <h2>Entities</h2>
+  <ul>
+    <li><strong>Virgin Modem</strong> (device)</li>
+    <li><strong>binary_sensor.virgin_modem_online</strong> (device_class: connectivity) — <em>on</em> when the UI answers.</li>
+    <li><strong>sensor.virgin_last_docsis_event</strong> — string of the newest DOCSIS event.
+      <br>Attributes include:
+      <ul>
+        <li><code>times</code>: a map of OIDs → timestamp strings.</li>
+        <li><code>messages</code>: a map of OIDs → event messages (e.g. T3 timeout, RCS Partial Service).</li>
+      </ul>
+    </li>
+  </ul>
 
-```plaintext
-bc:14:14:f1:81:1b;Brother Printer;Cloud Network Technology Singapore Pte. Ltd.
-b1:81:11:31:a1:b1;My iPhone;Apple Inc.
-```
+  <p><strong>Polling:</strong> The integration polls on the configured scan interval (default 60s). You can change this from the integration’s <em>Options</em>.</p>
 
-![Configuration Flow Example](https://github.com/parvez/network_scanner/assets/126749/bf08bc6d-a4a1-478c-8acb-5beffada2632)
+  <hr>
 
-### Option 2: Manually via configuration.yaml
+  <h2>What the Integration Reads</h2>
+  <p>
+    The modem UI exposes a JSON endpoint (e.g. <code>/getRouterStatus</code>) containing DOCSIS and event OIDs.
+    The integration selects the newest non-empty event from those OIDs and exposes it as
+    <code>sensor.virgin_last_docsis_event</code>, while keeping the full time/message maps in attributes for advanced use.
+  </p>
 
-You can configure the integration directly in `configuration.yaml` for more control, especially if adding multiple IP ranges and custom MAC mappings.
+  <hr>
 
-### Example Configuration:
+  <h2>Networking: VLAN &amp; ARP Considerations</h2>
 
-```yaml
-network_scanner:
-  ip_range: "10.100.1.0/24 10.1.1.0/24"
-  mac_mapping_1: "bc:14:14:f1:81:1b;Brother Printer;Cloud Network Technology Singapore Pte. Ltd."
-  mac_mapping_2: "b1:81:11:31:a1:b1;My iPhone;Apple Inc."
-```
+  <h3>Why this matters</h3>
+  <p>
+    When the Virgin Hub is in Modem Mode, it places its management UI at <code>192.168.100.1</code> on the
+    <em>WAN-side</em> L2 segment. Many setups block or simply don’t route that network by default.
+    Also, some modems only respond to ARP from the device directly connected to them (your firewall/router).
+    If Home Assistant can’t reach <code>192.168.100.1</code>, the integration will always show the modem as offline.
+  </p>
 
-## Displaying Devices in the UI using Markdown Card
+  <h3>Typical OPNsense Setup (recommended)</h3>
+  <ol>
+    <li><strong>Virtual IP on WAN:</strong> add an IP alias on the WAN interface in the modem’s subnet,
+        e.g. <code>192.168.100.2/24</code>. This makes the firewall L3-adjacent to the modem UI.</li>
+    <li><strong>Firewall rule on WAN:</strong> allow traffic from <em>WAN address</em> to <code>192.168.100.1</code> (HTTP).</li>
+    <li><strong>Outbound NAT for LAN → modem:</strong> add a rule so that LAN hosts (e.g. your HA box) accessing
+        <code>192.168.100.1</code> are NATed to the firewall’s <code>192.168.100.2</code>.
+        This makes the modem see your firewall as the source (solves ARP restrictions).</li>
+    <li><strong>Disable “Block private networks”</strong> on WAN if it prevents the above rule from working in your build.</li>
+  </ol>
 
-To visualize the devices detected by the Network Scanner in the Home Assistant interface, you can add a Lovelace Markdown card with the following configuration:
+  <p>
+    With the above, any host on your LAN (including Home Assistant) can browse
+    <code>http://192.168.100.1</code> and the connection will be NATed through the firewall’s WAN alias. The modem only needs to ARP the firewall’s MAC.
+  </p>
 
-```yaml
-type: markdown
-content: >
-  ## Devices
+  <h3>VLAN Approach (alternative)</h3>
+  <p>
+    Some users create a dedicated <em>“modem management”</em> VLAN that is bridged or extended to the WAN side on a managed switch.
+    In that design, Home Assistant is given access to the VLAN so it directly reaches <code>192.168.100.1</code>.
+    This can work, but be careful:
+  </p>
+  <ul>
+    <li>Do not leak untrusted WAN broadcast domains into your LAN.</li>
+    <li>Keep strict switch port profiles: the modem/WAN port untagged, HA port tagged only as needed.</li>
+    <li>Prefer the OPNsense alias + NAT method unless you are very comfortable with L2/L3 separation.</li>
+  </ul>
 
-  | IP Address | MAC Address | Custom Name | Custom Description | Hostname | Vendor |
-  |------------|-------------|-------------|--------------------|----------|--------|
+  <h3>Why ARP Tables Are Mentioned</h3>
+  <p>
+    Many cable modems in bridge mode will only reply to the MAC that lives on the directly attached port.
+    If a LAN host tries to ARP <code>192.168.100.1</code> across the firewall, the modem may not respond.
+    By NATing the LAN host’s traffic to the firewall’s <code>192.168.100.2</code> (WAN-side alias),
+    the modem only needs to ARP for that one address (the firewall), and the firewall handles the return path.
+  </p>
 
-  {% for device in state_attr('sensor.network_scanner', 'devices') %}
-  | {{ device.ip }} | {{ device.mac }} | {{ device.name }} | {{ device.type }} | {{ device.hostname }} | {{ device.vendor }} |
-  {% endfor %}
-```
+  <hr>
 
-This card will display a table with the IP Address, MAC Address, Custom Name, Hostname, and Vendor of each device that has been scanned on your network. Name and Type are custom mapping provided by the user.
+  <h2>Automations Ideas</h2>
+  <ul>
+    <li>Notify when <code>binary_sensor.virgin_modem_online</code> is <em>off</em> for 2 minutes.</li>
+    <li>Parse <code>sensor.virgin_last_docsis_event</code> for
+      <em>T3 timeout</em>, <em>RCS Partial Service</em>, or <em>T4</em> to distinguish ISP/line issues from LAN problems.</li>
+    <li>Pause auto-heals (modem power cycles) when you detect upstream plant issues (lots of T3/T4) to avoid thrashing.</li>
+  </ul>
 
-![Network Scanner Device List](https://github.com/parvez/network_scanner/assets/126749/64309b93-a8cd-43b6-93ab-58d55a4aac32)
+  <hr>
 
-## Displaying Devices in the UI using Flex Table
+  <h2>Options &amp; Schema</h2>
+  <p><strong>Options:</strong></p>
+  <ul>
+    <li><code>scan_interval</code> (seconds): default 60. Poll frequency for the modem status endpoint.</li>
+  </ul>
 
-Thanks to [@gridlockjoe](https://github.com/gridlockjoe), you can also display using the [Flex Table](https://github.com/custom-cards/flex-table-card) as such:
+  <p><strong>Data Model (high level):</strong></p>
+  <ul>
+    <li>Integration fetches JSON from the modem’s status endpoint.</li>
+    <li>Known OID lists are used to extract event <em>message</em> and <em>time</em> arrays.</li>
+    <li>Newest non-empty message is surfaced as the sensor value; full maps are exposed as attributes.</li>
+  </ul>
 
-```yaml
-type: custom:flex-table-card
-title: Devices
-entities:
-  include: sensor.network_scanner
-sort_by: x.ip+
-columns:
-  - name: IP Address
-    data: devices
-    modify: x.ip
-  - name: MAC Address
-    data: devices
-    modify: x.mac
-  - name: Custom Name
-    data: devices
-    modify: x.name
-  - name: Custom Description
-    data: devices
-    modify: x.type
-  - name: Hostname
-    data: devices
-    modify: x.hostname
-  - name: Vendor
-    data: devices
-    modify: x.vendor
-```
+  <hr>
 
-![Network Scanner Device List](https://github.com/parvez/network_scanner/assets/126749/b55f58ee-2f89-415f-b09b-fc457e52a074)
+  <h2>Troubleshooting</h2>
+  <ul>
+    <li><strong>Sensors never update:</strong> verify you can open <code>http://192.168.100.1</code> from the HA host (SSH into HA or use a diagnostics add-on and curl it). If not, fix routing/NAT as above.</li>
+    <li><strong>Only the firewall can browse the modem UI:</strong> add the WAN alias and outbound NAT so LAN hosts (including HA) are translated to the WAN alias.</li>
+    <li><strong>Frequent T3/T4 or RCS Partial Service:</strong> this is an upstream signal/noise problem. Collect logs and contact the ISP; power-cycling won’t fix ingress/noise.</li>
+    <li><strong>“Modem online” is off but Internet works:</strong> the modem UI can be rate-limited or briefly unavailable; increase scan interval to 120s or back off on timeouts.</li>
+  </ul>
 
-## Technical Details
+  <hr>
 
-The integration is composed of several Python scripts that manage the setup and updating of the network sensor:
+  <h2>Security Notes</h2>
+  <ul>
+    <li>The integration uses HTTP (no auth) to the modem UI on a private network. Do not expose <code>192.168.100.1</code> externally.</li>
+    <li>Keep your firewall rules minimal and specific to the modem UI.</li>
+  </ul>
 
-- `config_flow.py`: Handles the user interface for configuration.
-- `const.py`: Contains constants used by the integration.
-- `__init__.py`: Sets up and unloads the integration components.
-- `sensor.py`: Defines the Network Scanner sensor, including methods for scanning the network and parsing the MAC address mapping.
+  <hr>
 
-The network scan is performed every 15 minutes by default, and the results are logged for debugging purposes. The `nmap` library is used to scan the network, and the `async_setup_entry` function in `sensor.py` initializes the sensor with the IP range and MAC mappings specified in the configuration.
+  <h2>Changelog (short)</h2>
+  <ul>
+    <li>v0.1.0 — First public version with reachability + last DOCSIS event.</li>
+  </ul>
 
-## Troubleshooting
-
-If you encounter any issues:
-
-- Check the Home Assistant logs for errors related to the network scanner.
-- Ensure that the IP range and MAC address mappings are correctly formatted.
-- Verify that `nmap` is installed and accessible to the Home Assistant environment.
-
-## Contributing
-
-Contributions to this integration are welcome. Please refer to the project's GitHub repository for contributing guidelines.
+  <p>
+    Contributions welcome. Open issues/PRs for signal level sensors, richer event parsing, and diagnostics.
+  </p>
+</body>
+</html>
