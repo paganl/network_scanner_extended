@@ -8,7 +8,7 @@ from ipaddress import ip_network
 from typing import Dict
 
 import voluptuous as vol
-from homeassistant import config_entries
+from homeassistant.config_entries import ConfigEntry
 
 from .const import (
     DOMAIN,
@@ -352,5 +352,5 @@ class NetworkScannerOptionsFlow(config_entries.OptionsFlow):
             CONF_ARP_VERIFY_TLS: bool(user_input.get(CONF_ARP_VERIFY_TLS, opts.get(CONF_ARP_VERIFY_TLS, data.get(CONF_ARP_VERIFY_TLS, False)))),
         })
 
-async def async_get_options_flow(config_entry: config_entries.ConfigEntry):
+async def async_get_options_flow(config_entry: ConfigEntry):
     return NetworkScannerOptionsFlow(config_entry)
