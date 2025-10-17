@@ -271,7 +271,7 @@ class ScanController:
                     self._device_count = len(self._devices)
                     self._status = STATUS_ENRICHING
                     self._phase = PHASE_ARP
-                    async_dispatcher_send(self.hass, SIGNAL_NSX_UPDATED)
+                    self.hass.async_add_job(async_dispatcher_send, self.hass, SIGNAL_NSX_UPDATED)
 
             # -------- Phase 2: Nmap (optional) --------
             if self._nmap_args:
@@ -293,20 +293,20 @@ class ScanController:
                     self._device_count = len(final_list)
                     self._status = STATUS_OK
                     self._phase = PHASE_NMAP
-                    async_dispatcher_send(self.hass, SIGNAL_NSX_UPDATED)
+                    self.hass.async_add_job(async_dispatcher_send, self.hass, SIGNAL_NSX_UPDATED)
             else:
                 # ARP-only path
                 if my_gen == self._scan_gen:
                     self._status = STATUS_OK if arp_map else STATUS_ERROR
                     self._phase = PHASE_IDLE
-                    async_dispatcher_send(self.hass, SIGNAL_NSX_UPDATED)
+                    self.hass.async_add_job(async_dispatcher_send, self.hass, SIGNAL_NSX_UPDATED)
 
         except Exception as exc:
             _LOGGER.exception("Scan failed: %s", exc)
             if my_gen == self._scan_gen:
                 self._status = STATUS_ERROR
                 self._phase = PHASE_IDLE
-                async_dispatcher_send(self.hass, SIGNAL_NSX_UPDATED)
+                self.hass.async_add_job(async_dispatcher_send, self.hass, SIGNAL_NSX_UPDATED)
         finally:
             if my_gen == self._scan_gen:
                 self._last_scan_finished = _now_iso()
