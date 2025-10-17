@@ -57,7 +57,7 @@ class NetworkScannerExtendedSensor(SensorEntity):
             self._unsub_dispatcher = None
 
     def _handle_push_update(self) -> None:
-        self.async_write_ha_state()
+        self.schedule_update_ha_state()
 
     @property
     def unique_id(self) -> str:
@@ -117,7 +117,7 @@ class NetworkScannerExtendedStatus(SensorEntity):
             self._unsub_dispatcher = None
 
     def _handle_push_update(self) -> None:
-        self.async_write_ha_state()
+        self.schedule_update_ha_state()
 
     @property
     def unique_id(self) -> str:
