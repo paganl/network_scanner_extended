@@ -1,4 +1,4 @@
-# custom_components/network_scanner_extended/controller.py
+# custom_components/network_scanner/controller.py
 from __future__ import annotations
 from typing import Any, Dict, List, Optional, Tuple
 import asyncio
@@ -13,6 +13,7 @@ from aiohttp import ClientError, ClientTimeout, BasicAuth
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 
 from .const import (
     DOMAIN,
@@ -21,6 +22,13 @@ from .const import (
     CONF_ARP_PROVIDER,
     ARP_PROVIDER_NONE,
     ARP_PROVIDER_OPNSENSE,
+    DEFAULT_OPNSENSE_URL,
+    OPNSENSE_ARP_PATH,
+    CONF_ARP_VERIFY_TLS,
+    # status/phase + signal
+    STATUS_IDLE, STATUS_SCANNING, STATUS_ENRICHING, STATUS_OK, STATUS_ERROR,
+    PHASE_IDLE, PHASE_ARP, PHASE_NMAP,
+    SIGNAL_NSX_UPDATED,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -54,9 +62,10 @@ def _clean_mac(s: Optional[str]) -> str:
 
 def _ip_sort_key(ip_str: str) -> List[int]:
     try:
-        return [int(p) for p in ip_str.split(".")]
+        ip = ip_address(ip_str)
+        return [0 if ip.version == 4 else 1, int(ip)]
     except Exception:
-        return [999, 999, 999, 999]
+        return [2, 0]
 
 def _parse_dir_obj(obj: Any) -> Dict[str, Dict[str, str]]:
     """
@@ -108,19 +117,18 @@ class ScanController:
 
     Public properties used by sensors/buttons:
       devices, device_count, status, last_scan_started, last_scan_finished,
-      cidrs, nmap_args, scan_interval
+      cidrs, nmap_args, scan_interval, phase
     """
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         self.hass = hass
         self._entry = entry
-        self.nm = nmap.PortScanner()
 
         # live state
         self._devices: List[Dict[str, Any]] = []
         self._device_count: int = 0
-        self._status: str = "idle"          # idle | scanning | enriching | ok | error
-        self._phase: str = "idle"           # idle | arp | nmap
+        self._status: str = STATUS_IDLE
+        self._phase: str = PHASE_IDLE
         self._last_scan_started: Optional[str] = None
         self._last_scan_finished: Optional[str] = None
         self._is_scanning: bool = False
@@ -138,6 +146,7 @@ class ScanController:
         self._opn_key: str = ""
         self._opn_sec: str = ""
         self._opn_iface: str = ""
+        self._opn_verify_tls: bool = False
         self._opn_timeout = ClientTimeout(total=10)
 
         self.apply_entry(entry)
@@ -175,12 +184,11 @@ class ScanController:
     @property
     def scan_interval(self) -> int:
         return self._scan_interval
-    
+
     @property
     def phase(self) -> str:
         # idle | arp | nmap
         return self._phase
-
 
     # ---------------- config handling ----------------
 
@@ -206,6 +214,7 @@ class ScanController:
         self._opn_key = _norm(opts.get("opnsense_key") or data.get("opnsense_key"))
         self._opn_sec = _norm(opts.get("opnsense_secret") or data.get("opnsense_secret"))
         self._opn_iface = _norm(opts.get("opnsense_interface") or data.get("opnsense_interface"))
+        self._opn_verify_tls = bool(opts.get(CONF_ARP_VERIFY_TLS, data.get(CONF_ARP_VERIFY_TLS, False)))
 
     # ---------------- scheduling ----------------
 
@@ -229,8 +238,8 @@ class ScanController:
         if self._is_scanning:
             return
         self._is_scanning = True
-        self._status = "scanning"
-        self._phase = "arp"
+        self._status = STATUS_SCANNING
+        self._phase = PHASE_ARP
         self._last_scan_started = _now_iso()
         self._scan_gen += 1
         my_gen = self._scan_gen
@@ -238,7 +247,12 @@ class ScanController:
         try:
             # -------- Phase 1: ARP (publish immediately if we got anything) --------
             arp_map: Dict[str, Dict[str, Any]] = {}
-            if self._arp_provider == ARP_PROVIDER_OPNSENSE and self._opn_url and self._opn_key and self._opn_sec:
+            if (
+                self._arp_provider == ARP_PROVIDER_OPNSENSE
+                and self._opn_url
+                and self._opn_key
+                and self._opn_sec
+            ):
                 try:
                     arp_pairs = await self._fetch_arp_table_opnsense()  # {ip: mac}
                     arp_map = self._arp_pairs_to_devices(arp_pairs)
@@ -255,8 +269,9 @@ class ScanController:
                 if my_gen == self._scan_gen:
                     self._devices = sorted(arp_map.values(), key=lambda d: _ip_sort_key(d.get("ip", "")))
                     self._device_count = len(self._devices)
-                    self._status = "enriching"
-                    self._phase = "arp"
+                    self._status = STATUS_ENRICHING
+                    self._phase = PHASE_ARP
+                    async_dispatcher_send(self.hass, SIGNAL_NSX_UPDATED)
 
             # -------- Phase 2: Nmap (optional) --------
             if self._nmap_args:
@@ -276,19 +291,22 @@ class ScanController:
                     final_list = sorted(merged.values(), key=lambda d: _ip_sort_key(d.get("ip", "")))
                     self._devices = final_list
                     self._device_count = len(final_list)
-                    self._status = "ok"
-                    self._phase = "nmap"
+                    self._status = STATUS_OK
+                    self._phase = PHASE_NMAP
+                    async_dispatcher_send(self.hass, SIGNAL_NSX_UPDATED)
             else:
-                # ARP only (if we had no ARP either, we still publish empty result with ok/error state)
+                # ARP-only path
                 if my_gen == self._scan_gen:
-                    self._status = "ok" if arp_map else "ok"
-                    self._phase = "idle"
+                    self._status = STATUS_OK if arp_map else STATUS_ERROR
+                    self._phase = PHASE_IDLE
+                    async_dispatcher_send(self.hass, SIGNAL_NSX_UPDATED)
 
         except Exception as exc:
             _LOGGER.exception("Scan failed: %s", exc)
             if my_gen == self._scan_gen:
-                self._status = "error"
-                self._phase = "idle"
+                self._status = STATUS_ERROR
+                self._phase = PHASE_IDLE
+                async_dispatcher_send(self.hass, SIGNAL_NSX_UPDATED)
         finally:
             if my_gen == self._scan_gen:
                 self._last_scan_finished = _now_iso()
@@ -298,10 +316,16 @@ class ScanController:
 
     def _scan_cidr_nmap(self, cidr: str, nmap_args: str) -> Dict[str, Dict[str, Any]]:
         out: Dict[str, Dict[str, Any]] = {}
-        self.nm.scan(hosts=cidr, arguments=nmap_args)
-        for host in self.nm.all_hosts():
+        try:
+            nm = nmap.PortScanner()
+            nm.scan(hosts=cidr, arguments=nmap_args)
+        except Exception as exc:
+            _LOGGER.warning("nmap scan failed for %s: %s", cidr, exc)
+            return out
+
+        for host in nm.all_hosts():
             try:
-                node = self.nm[host]
+                node = nm[host]
                 addrs = node.get("addresses", {})
                 ip = addrs.get("ipv4") or addrs.get("ipv6") or ""
                 if not ip:
@@ -359,7 +383,7 @@ class ScanController:
                     auth=auth,
                     data=payload,               # OPNsense expects form-encoded
                     timeout=self._opn_timeout,
-                    ssl=False,                  # self-signed by default
+                    ssl=self._opn_verify_tls,   # respect TLS verify setting
                     headers=headers,
                 ) as resp:
                     txt = await resp.text()
@@ -441,6 +465,8 @@ class ScanController:
     ) -> Dict[str, Dict[str, Any]]:
         """
         Merge union of IPs; prefer filled MACs; keep union of sources.
+        NB: If devices changed IPs between phases, this is IP-keyed and may
+        duplicate by MAC—dedup by MAC can be added later if desired.
         """
         out: Dict[str, Dict[str, Any]] = {}
         all_ips = set(nmap_map.keys()) | set(arp_map.keys())
@@ -484,9 +510,12 @@ class ScanController:
         for dev in by_ip.values():
             mac = _clean_mac(dev.get("mac", ""))
             override = directory.get(mac, {}) if mac else {}
-            # keep existing name/type if already set, otherwise apply override or sensible default
-            dev["name"] = override.get("name") or dev.get("name") or "Unknown Device"
-            dev["type"] = override.get("desc") or dev.get("type") or "Unknown Device"
+            # Only apply provided overrides; don't force "Unknown Device"
+            if override:
+                if override.get("name"):
+                    dev["name"] = override["name"]
+                if override.get("desc"):
+                    dev["type"] = override["desc"]
 
     # ---------------- directory building ----------------
 
