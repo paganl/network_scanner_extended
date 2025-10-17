@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
-from typing import Final, Callable
+from typing import Final
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
@@ -23,17 +23,15 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     controller = ScanController(hass, entry)
 
-    # Set up a lightweight scheduler to trigger auto-scans
-    def _tick(_now) -> None:
-        # Fire-and-forget; controller handles gating and concurrency
-        hass.async_create_task(controller.maybe_auto_scan())
+    async def _tick(_now) -> None:
+        # Runs in the event loop; await directly (no create_task here)
+        await controller.maybe_auto_scan()
 
-    unsub_interval: Callable[[], None] = async_track_time_interval(
-        hass, _tick, timedelta(minutes=1)
-    )
+    # Register the minute ticker
+    unsub_interval = async_track_time_interval(hass, _tick, timedelta(minutes=1))
 
-    # Kick once shortly after startup so first results appear without waiting a full interval
-    hass.loop.call_soon_threadsafe(lambda: hass.async_create_task(controller.maybe_auto_scan()))
+    # Kick once on setup (we’re already on the event loop)
+    hass.async_create_task(controller.maybe_auto_scan())
 
     # Keep references for unload
     hass.data[DOMAIN][entry.entry_id] = {
