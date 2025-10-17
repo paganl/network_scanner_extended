@@ -8,7 +8,7 @@ from ipaddress import ip_network
 from typing import Dict
 
 import voluptuous as vol
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.config_entries import ConfigFlow, OptionsFlow, ConfigEntry
 
 from .const import (
     DOMAIN,
@@ -120,7 +120,7 @@ except Exception:
 
 # ---------- Config Flow ----------
 
-class NetworkScannerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
+class NetworkScannerConfigFlow(ConfigFlow, domain=DOMAIN):
     VERSION = 1
 
     async def async_step_user(self, user_input=None):
@@ -234,8 +234,8 @@ class NetworkScannerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 # ---------- Options Flow ----------
 
-class NetworkScannerOptionsFlow(config_entries.OptionsFlow):
-    def __init__(self, entry: config_entries.ConfigEntry) -> None:
+class NetworkScannerOptionsFlow(OptionsFlow):
+    def __init__(self, entry: ConfigEntry) -> None:
         self.entry = entry
 
     async def async_step_init(self, user_input=None):
