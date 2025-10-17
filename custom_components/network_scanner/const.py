@@ -29,6 +29,7 @@ OPNSENSE_ARP_PATH = "/api/diagnostics/interface/search_arp/"
 
 # Card-friendly status strings
 STATUS_IDLE = "idle"
+STATUS_ENRICHING = "enriching"
 STATUS_SCANNING = "scanning"
 STATUS_OK = "ok"
 STATUS_ERROR = "error"
