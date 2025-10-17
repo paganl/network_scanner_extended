@@ -1,3 +1,4 @@
+# custom_components/network_scanner/const.py
 from __future__ import annotations
 
 DOMAIN: str = "network_scanner"
@@ -11,12 +12,12 @@ DEFAULT_NMAP_ARGS = "-sn -PE -PS22,80,443 -PA80,443 -PU53 -T4"
 # Default scan interval in seconds (make it generous if your scans take minutes)
 DEFAULT_SCAN_INTERVAL = 240
 
-# ARP enrichment settings 
+# ARP enrichment settings
 CONF_ARP_PROVIDER   = "arp_provider"
-CONF_ARP_BASE_URL   = "arp_base_url"
+CONF_ARP_BASE_URL   = "arp_base_url"  # reserved (not used directly)
 CONF_ARP_KEY        = "arp_key"
 CONF_ARP_SECRET     = "arp_secret"
-CONF_ARP_VERIFY_TLS = "arp_verify_tls"
+CONF_ARP_VERIFY_TLS = "arp_verify_tls"  # NEW: allow TLS verification toggle
 
 ARP_PROVIDER_NONE     = "none"
 ARP_PROVIDER_OPNSENSE = "opnsense"
@@ -29,7 +30,15 @@ OPNSENSE_ARP_PATH = "/api/diagnostics/interface/search_arp/"
 
 # Card-friendly status strings
 STATUS_IDLE = "idle"
-STATUS_ENRICHING = "enriching"
 STATUS_SCANNING = "scanning"
+STATUS_ENRICHING = "enriching"
 STATUS_OK = "ok"
 STATUS_ERROR = "error"
+
+# Phases
+PHASE_IDLE = "idle"
+PHASE_ARP = "arp"
+PHASE_NMAP = "nmap"
+
+# Dispatcher signal so sensors can update immediately on publish
+SIGNAL_NSX_UPDATED = "network_scanner_extended_updated"
