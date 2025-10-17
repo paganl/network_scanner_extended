@@ -22,11 +22,14 @@ from .const import (
     # OPNsense
     DEFAULT_OPNSENSE_URL,
     DEFAULT_OPNSENSE_IFACE,
+    CONF_ARP_VERIFY_TLS,
 )
 
 _LOGGER = logging.getLogger(__name__)
 
 # ---------- helpers ----------
+
+_FORBIDDEN_NMAP_CHARS = re.compile(r"[;&|`$><]")
 
 def _secs_to_minutes(secs: int | None) -> int:
     if not isinstance(secs, int) or secs < 0:
@@ -82,6 +85,11 @@ def _build_dir(txt: str) -> dict[str, dict]:
             else:
                 out[mk] = {"name": str(v), "desc": ""}
     return out
+
+def _nmap_args_invalid(s: str) -> bool:
+    if not s:
+        return False
+    return bool(_FORBIDDEN_NMAP_CHARS.search(s))
 
 # ---------- selectors (safe) ----------
 
@@ -150,6 +158,8 @@ class NetworkScannerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 description={"suggested_value": ""}): str,
             vol.Optional("opnsense_interface",
                 description={"suggested_value": DEFAULT_OPNSENSE_IFACE}): str,
+            vol.Optional(CONF_ARP_VERIFY_TLS,
+                description={"suggested_value": False}): bool,
 
             # Directory
             vol.Optional("mac_directory_json_text",
@@ -178,6 +188,11 @@ class NetworkScannerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if mins < 0 or mins > 1440:
             errors["scan_interval_minutes"] = "invalid_scan_interval"
 
+        # nmap args sanity
+        nmap_args = (user_input.get("nmap_args") or DEFAULT_NMAP_ARGS).strip()
+        if _nmap_args_invalid(nmap_args):
+            errors["nmap_args"] = "invalid_nmap_args"
+
         # OPNsense URL consistency
         opn_url = (user_input.get("opnsense_url") or "").strip()
         opn_key = (user_input.get("opnsense_key") or "").strip()
@@ -200,7 +215,7 @@ class NetworkScannerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         data = {
             "ip_range": ipr,
-            "nmap_args": (user_input.get("nmap_args") or DEFAULT_NMAP_ARGS).strip(),
+            "nmap_args": nmap_args,
             "scan_interval": scan_secs,  # seconds (0 disables auto)
             "mac_directory": directory,
             "mac_directory_json_url": (user_input.get("mac_directory_json_url") or "").strip(),
@@ -213,6 +228,7 @@ class NetworkScannerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             "opnsense_key": opn_key,
             "opnsense_secret": opn_sec,
             "opnsense_interface": (user_input.get("opnsense_interface") or "").strip(),
+            CONF_ARP_VERIFY_TLS: bool(user_input.get(CONF_ARP_VERIFY_TLS, False)),
         }
         return self.async_create_entry(title="Network Scanner Extended", data=data)
 
@@ -261,6 +277,8 @@ class NetworkScannerOptionsFlow(config_entries.OptionsFlow):
                 description={"suggested_value": "********" if (opts.get('opnsense_secret') or data.get('opnsense_secret')) else ""}): str,
             vol.Optional("opnsense_interface",
                 description={"suggested_value": opts.get("opnsense_interface", data.get("opnsense_interface", DEFAULT_OPNSENSE_IFACE))}): str,
+            vol.Optional(CONF_ARP_VERIFY_TLS,
+                description={"suggested_value": opts.get(CONF_ARP_VERIFY_TLS, data.get(CONF_ARP_VERIFY_TLS, False))}): bool,
 
             # Directory
             vol.Optional(
@@ -286,6 +304,11 @@ class NetworkScannerOptionsFlow(config_entries.OptionsFlow):
         mins = _get_int(user_input, "scan_interval_minutes", saved_mins)
         if mins < 0 or mins > 1440:
             errors["scan_interval_minutes"] = "invalid_scan_interval"
+
+        # nmap args sanity
+        nmap_args = (user_input.get("nmap_args") or opts.get("nmap_args") or DEFAULT_NMAP_ARGS).strip()
+        if _nmap_args_invalid(nmap_args):
+            errors["nmap_args"] = "invalid_nmap_args"
 
         # Handle OPNsense URL + placeholder secrets
         prev_key = opts.get("opnsense_key") or data.get("opnsense_key", "")
@@ -313,7 +336,7 @@ class NetworkScannerOptionsFlow(config_entries.OptionsFlow):
 
         return self.async_create_entry(title="", data={
             "ip_range": ipr,
-            "nmap_args": (user_input.get("nmap_args") or DEFAULT_NMAP_ARGS).strip(),
+            "nmap_args": nmap_args,
             "scan_interval": scan_secs,  # seconds; 0 disables auto-scan
             # persist provider in OPTIONS too
             CONF_ARP_PROVIDER: user_input.get(
@@ -326,6 +349,7 @@ class NetworkScannerOptionsFlow(config_entries.OptionsFlow):
             "opnsense_key": opn_key,
             "opnsense_secret": opn_sec,
             "opnsense_interface": (user_input.get("opnsense_interface") or "").strip(),
+            CONF_ARP_VERIFY_TLS: bool(user_input.get(CONF_ARP_VERIFY_TLS, opts.get(CONF_ARP_VERIFY_TLS, data.get(CONF_ARP_VERIFY_TLS, False)))),
         })
 
 async def async_get_options_flow(config_entry: config_entries.ConfigEntry):
