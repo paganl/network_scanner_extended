@@ -32,7 +32,11 @@ DEFAULT_OPNSENSE_IFACE = ""            # optional (e.g. "lan", "vlan30")
 OPNSENSE_ARP_PATH      = "/api/diagnostics/interface/search_arp/"
 
 # AdGuard defaults
-DEFAULT_ADGUARD_URL    = "http://127.0.0.1:3000"  # change to your AGH host/port
+# AdGuard provider config keys
+CONF_ADG_URL  = "adguard_url"
+CONF_ADG_USER = "adguard_username"
+CONF_ADG_PASS = "adguard_password"
+DEFAULT_ADGUARD_URL    = "http://10.2.0.3:3000"  # change to your AGH host/port
 
 # Card-friendly status strings
 STATUS_IDLE = "idle"
