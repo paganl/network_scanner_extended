@@ -7,7 +7,7 @@ import logging
 import re
 from datetime import datetime, timezone
 from ipaddress import ip_network, ip_address
-from .adguard import AdGuardDHCPClient
+
 
 import nmap
 from aiohttp import ClientError, ClientTimeout, BasicAuth
@@ -35,7 +35,7 @@ from .const import (
 )
 
 from .opnsense import OPNsenseARPClient
-from .adguard import AdGuardARPClient          # NEW
+from .adguard import AdGuardDHCPClient        # NEW
 
 _LOGGER = logging.getLogger(__name__)
 
