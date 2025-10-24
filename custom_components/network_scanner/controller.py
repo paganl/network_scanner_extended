@@ -38,7 +38,7 @@ from .adguard import AdGuardARPClient          # NEW
 _LOGGER = logging.getLogger(__name__)
 
 # -------------------- small helpers --------------------
-
+   
 def _emit_update(hass) -> None:
     # Fire the dispatcher on the HA loop, thread-safe
     hass.loop.call_soon_threadsafe(async_dispatcher_send, hass, SIGNAL_NSX_UPDATED)
