@@ -17,15 +17,12 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
 from .const import (
-    DOMAIN,
     DEFAULT_NMAP_ARGS,
     DEFAULT_SCAN_INTERVAL,
     CONF_ARP_PROVIDER,
     ARP_PROVIDER_NONE,
     ARP_PROVIDER_OPNSENSE,
     ARP_PROVIDER_ADGUARD,              # NEW
-    DEFAULT_OPNSENSE_URL,
-    OPNSENSE_ARP_PATH,
     CONF_ARP_VERIFY_TLS,
     # status/phase + signal
     STATUS_IDLE, STATUS_SCANNING, STATUS_ENRICHING, STATUS_OK, STATUS_ERROR,
@@ -41,9 +38,10 @@ _LOGGER = logging.getLogger(__name__)
 
 # -------------------- small helpers --------------------
    
-def _emit_update(hass) -> None:
-    # Fire the dispatcher on the HA loop, thread-safe
-    hass.loop.call_soon_threadsafe(async_dispatcher_send, hass, SIGNAL_NSX_UPDATED)
+def _emit_update(self) -> None:
+    self.hass.loop.call_soon_threadsafe(
+        async_dispatcher_send, self.hass, SIGNAL_NSX_UPDATED
+    )
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -104,60 +102,60 @@ def _ip_in_any(ip_str: str, nets: List[Tuple[str, object]]) -> bool:
             continue
     return False
 
-def _nmap_scan_ranges(self, cidrs: List[str], nmap_args: str) -> Dict[str, Dict[str, Any]]:
-    """
-    Reuse a single PortScanner to sweep multiple CIDRs sequentially.
-    Runs in executor; safe to block here.
-    """
-    out: Dict[str, Dict[str, Any]] = {}
-    try:
-        nm = nmap.PortScanner()
-    except Exception as exc:
-        _LOGGER.warning("nmap init failed: %s", exc)
-        return out
-
-    for cidr in cidrs:
-        try:
-            nm.scan(hosts=cidr, arguments=nmap_args)
-        except Exception as exc:
-            _LOGGER.warning("nmap scan failed for %s: %s", cidr, exc)
-            continue
-
-        for host in nm.all_hosts():
-            try:
-                node = nm[host]
-                addrs = node.get("addresses", {})
-                ip = addrs.get("ipv4") or addrs.get("ipv6") or ""
-                if not ip:
-                    continue
-                mac = _clean_mac(addrs.get("mac") or "")
-                vendor = "Unknown"
-                ven_map = node.get("vendor", {})
-                if isinstance(ven_map, dict) and mac:
-                    for k, v in ven_map.items():
-                        if _clean_mac(k) == mac:
-                            vendor = v
-                            break
-                hostname = node.hostname() or ""
-                # only take first sighting per IP across ranges
-                if ip not in out:
-                    out[ip] = {
-                        "ip": ip,
-                        "mac": mac,
-                        "vendor": vendor,
-                        "hostname": hostname,
-                        "source": ["nmap"],
-                        "name": "",
-                        "type": "",
-                    }
-            except Exception as exc:
-                _LOGGER.debug("nmap parse skip host %s: %s", host, exc)
-    return out
-
-
 # -------------------- controller --------------------
 
 class ScanController:
+
+    def _nmap_scan_ranges(self, cidrs: List[str], nmap_args: str) -> Dict[str, Dict[str, Any]]:
+        """
+        Reuse a single PortScanner to sweep multiple CIDRs sequentially.
+        Runs in executor; safe to block here.
+        """
+        out: Dict[str, Dict[str, Any]] = {}
+        try:
+            nm = nmap.PortScanner()
+        except Exception as exc:
+            _LOGGER.warning("nmap init failed: %s", exc)
+            return out
+    
+        for cidr in cidrs:
+            try:
+                nm.scan(hosts=cidr, arguments=nmap_args)
+            except Exception as exc:
+                _LOGGER.warning("nmap scan failed for %s: %s", cidr, exc)
+                continue
+    
+            for host in nm.all_hosts():
+                try:
+                    node = nm[host]
+                    addrs = node.get("addresses", {})
+                    ip = addrs.get("ipv4") or addrs.get("ipv6") or ""
+                    if not ip:
+                        continue
+                    mac = _clean_mac(addrs.get("mac") or "")
+                    vendor = "Unknown"
+                    ven_map = node.get("vendor", {})
+                    if isinstance(ven_map, dict) and mac:
+                        for k, v in ven_map.items():
+                            if _clean_mac(k) == mac:
+                                vendor = v
+                                break
+                    hostname = node.hostname() or ""
+                    # only take first sighting per IP across ranges
+                    if ip not in out:
+                        out[ip] = {
+                            "ip": ip,
+                            "mac": mac,
+                            "vendor": vendor,
+                            "hostname": hostname,
+                            "source": ["nmap"],
+                            "name": "",
+                            "type": "",
+                        }
+                except Exception as exc:
+                    _LOGGER.debug("nmap parse skip host %s: %s", host, exc)
+        return out
+    
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         self.hass = hass
         self._entry = entry
@@ -273,7 +271,7 @@ class ScanController:
         self._last_scan_started = _now_iso()
         self._scan_gen += 1
         my_gen = self._scan_gen
-        _emit_update(self.hass)
+        self._emit_update()
 
         try:
             # -------- Phase 1: ARP provider --------
@@ -283,7 +281,7 @@ class ScanController:
                     arp_pairs = await self._fetch_arp_table_opnsense()
                     arp_map = self._arp_pairs_to_devices(arp_pairs)
                 elif self._arp_provider == ARP_PROVIDER_ADGUARD and self._adg_url and self._adg_user and self._adg_pass:
-                    adg = AdGuardDHCPClient(self._adg_url, self._adg_user, self._adg_pass, verify_tls=self._opn_verify_tls)
+                    adg = AdGuardDHCPClient(self._adg_url, self._adg_user, self._adg_pass, verify_tls=self._verify_tls)
                     arp_pairs = await adg.fetch_map(self.hass)
                     arp_map = self._arp_pairs_to_devices(arp_pairs)
             except Exception as exc:
@@ -301,7 +299,7 @@ class ScanController:
                     self._device_count = len(self._devices)
                     self._status = STATUS_ENRICHING
                     self._phase = PHASE_ARP
-                    _emit_update(self.hass)
+                    self._emit_update()
 
             # -------- Phase 2: nmap (optional) --------
             if self._nmap_args:
@@ -319,23 +317,24 @@ class ScanController:
                     self._device_count = len(final_list)
                     self._status = STATUS_OK
                     self._phase = PHASE_NMAP
-                    _emit_update(self.hass)
+                    self._emit_update()
             else:
                 if my_gen == self._scan_gen:
                     self._status = STATUS_OK if arp_map else STATUS_ERROR
                     self._phase = PHASE_IDLE
-                    _emit_update(self.hass)
+                    self._emit_update()
 
         except Exception as exc:
             _LOGGER.exception("Scan failed: %s", exc)
             if my_gen == self._scan_gen:
                 self._status = STATUS_ERROR
                 self._phase = PHASE_IDLE
-                _emit_update(self.hass)
+                self._emit_update()
         finally:
             if my_gen == self._scan_gen:
                 self._last_scan_finished = _now_iso()
                 self._is_scanning = False
+                self._emit_update()
 
     # ---------------- nmap ----------------
     def _scan_cidr_nmap(self, cidr: str, nmap_args: str) -> Dict[str, Dict[str, Any]]:
