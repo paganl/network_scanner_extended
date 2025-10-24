@@ -1,5 +1,4 @@
-# custom_components/network_scanner_extended/button.py
-from __future__ import annotations
+# custom_components/network_scanner/button.py
 from homeassistant.components.button import ButtonEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -17,7 +16,7 @@ class NetworkScannerScanNow(ButtonEntity):
         self._attr_unique_id = f"{DOMAIN}_{entry.entry_id}_scan_now"
 
     async def async_press(self) -> None:
-        self._ctl.hass.async_create_task(self._ctl.scan_now())
+        await self._ctl.scan_now()   # <-- await the coroutine
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities):
     controller: ScanController = hass.data[DOMAIN][entry.entry_id]["controller"]
