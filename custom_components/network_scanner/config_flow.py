@@ -242,4 +242,138 @@ class NetworkScannerOptionsFlow(OptionsFlow):
     def __init__(self, entry: ConfigEntry) -> None:
         self.entry = entry
 
-    a
+    async def async_step_init(self, user_input=None):
+        return await self.async_step_user(user_input)
+
+    async def async_step_user(self, user_input=None):
+        data = self.entry.data or {}
+        opts = self.entry.options or {}
+
+        saved_secs = opts.get("scan_interval", data.get("scan_interval", DEFAULT_SCAN_INTERVAL))
+        saved_mins = _secs_to_minutes(saved_secs)
+
+        schema = vol.Schema({
+            vol.Required("ip_range",
+                description={"suggested_value": opts.get("ip_range", data.get("ip_range", DEFAULT_IP_RANGE))}): str,
+            vol.Optional("nmap_args",
+                description={"suggested_value": opts.get("nmap_args", data.get("nmap_args", DEFAULT_NMAP_ARGS))}): str,
+            vol.Optional("scan_interval_minutes",
+                description={"suggested_value": saved_mins}): MinutesNumberSelector(),
+
+            vol.Optional(CONF_ARP_PROVIDER,
+                description={"suggested_value": opts.get(CONF_ARP_PROVIDER, data.get(CONF_ARP_PROVIDER, DEFAULT_ARP_PROVIDER))}): vol.In(ARP_PROVIDERS),
+
+            # OPNsense
+            vol.Optional("opnsense_url",
+                description={"suggested_value": opts.get("opnsense_url", data.get("opnsense_url", DEFAULT_OPNSENSE_URL))}): str,
+            vol.Optional("opnsense_key",
+                description={"suggested_value": "********" if (opts.get("opnsense_key") or data.get("opnsense_key")) else ""}): str,
+            vol.Optional("opnsense_secret",
+                description={"suggested_value": "********" if (opts.get("opnsense_secret") or data.get("opnsense_secret")) else ""}): str,
+            vol.Optional("opnsense_interface",
+                description={"suggested_value": opts.get("opnsense_interface", data.get("opnsense_interface", DEFAULT_OPNSENSE_IFACE))}): str,
+
+            # AdGuard (use constants)
+            vol.Optional(CONF_ADG_URL,
+                description={"suggested_value": opts.get(CONF_ADG_URL, data.get(CONF_ADG_URL, DEFAULT_ADGUARD_URL))}): str,
+            vol.Optional(CONF_ADG_USER,
+                description={"suggested_value": "********" if (opts.get(CONF_ADG_USER) or data.get(CONF_ADG_USER)) else ""}): str,
+            vol.Optional(CONF_ADG_PASS,
+                description={"suggested_value": "********" if (opts.get(CONF_ADG_PASS) or data.get(CONF_ADG_PASS)) else ""}): str,
+
+            vol.Optional(CONF_ARP_VERIFY_TLS,
+                description={"suggested_value": opts.get(CONF_ARP_VERIFY_TLS, data.get(CONF_ARP_VERIFY_TLS, False))}): bool,
+
+            # Directory
+            vol.Optional("mac_directory_json_text",
+                description={"suggested_value": opts.get("mac_directory_json_text", "")}): TextSelector(),
+            vol.Optional("mac_directory_json_url",
+                description={"suggested_value": opts.get("mac_directory_json_url", data.get("mac_directory_json_url", ""))}): str,
+        })
+
+        if user_input is None:
+            return self.async_show_form(step_id="user", data_schema=schema, errors={})
+
+        errors: Dict[str, str] = {}
+
+        provider = user_input.get(CONF_ARP_PROVIDER, opts.get(CONF_ARP_PROVIDER, data.get(CONF_ARP_PROVIDER, DEFAULT_ARP_PROVIDER)))
+
+        ipr = (user_input.get("ip_range") or "").strip()
+        cidrs = _split_cidrs(ipr)
+        if not cidrs or any(_cidr_bad(c) for c in cidrs):
+            errors["ip_range"] = "invalid_ip_range"
+
+        mins = _get_int(user_input, "scan_interval_minutes", saved_mins)
+        if mins < 0 or mins > 1440:
+            errors["scan_interval_minutes"] = "invalid_scan_interval"
+
+        # nmap args sanity
+        nmap_args = (user_input.get("nmap_args") or opts.get("nmap_args") or DEFAULT_NMAP_ARGS).strip()
+        if _nmap_args_invalid(nmap_args):
+            errors["nmap_args"] = "invalid_nmap_args"
+
+        # Secrets placeholders
+        prev_key = opts.get("opnsense_key") or data.get("opnsense_key", "")
+        prev_sec = opts.get("opnsense_secret") or data.get("opnsense_secret", "")
+        key_in   = (user_input.get("opnsense_key") or "").strip()
+        sec_in   = (user_input.get("opnsense_secret") or "").strip()
+        opn_key  = prev_key if key_in == "********" else key_in
+        opn_sec  = prev_sec if sec_in == "********" else sec_in
+
+        prev_ag_user = opts.get(CONF_ADG_USER) or data.get(CONF_ADG_USER, "")
+        prev_ag_pass = opts.get(CONF_ADG_PASS) or data.get(CONF_ADG_PASS, "")
+        ag_user_in   = (user_input.get(CONF_ADG_USER) or "").strip()
+        ag_pass_in   = (user_input.get(CONF_ADG_PASS) or "").strip()
+        ag_user      = prev_ag_user if ag_user_in == "********" else ag_user_in
+        ag_pass      = prev_ag_pass if ag_pass_in == "********" else ag_pass_in
+
+        # URLs (provider-aware)
+        def _chk_url(field: str, val: str):
+            if val and not val.startswith(("http://", "https://")):
+                errors[field] = "invalid_url"
+
+        opn_url = (user_input.get("opnsense_url") or "").strip()
+        ag_url  = (user_input.get(CONF_ADG_URL) or "").strip()
+
+        if provider == "opnsense":
+            _chk_url("opnsense_url", opn_url)
+            if (opn_key and not opn_sec) or (opn_sec and not opn_key):
+                errors["opnsense_key"] = "incomplete_credentials"
+        elif provider == "adguard":
+            _chk_url(CONF_ADG_URL, ag_url)
+            if (ag_user and not ag_pass) or (ag_pass and not ag_user):
+                errors[CONF_ADG_USER] = "incomplete_credentials"
+
+        jtxt = (user_input.get("mac_directory_json_text") or "").strip()
+        if jtxt and not _is_dir_json(jtxt):
+            errors["mac_directory_json_text"] = "invalid_json"
+
+        if errors:
+            return self.async_show_form(step_id="user", data_schema=schema, errors=errors)
+
+        scan_secs = _minutes_to_secs(mins, DEFAULT_SCAN_INTERVAL)
+
+        return self.async_create_entry(title="", data={
+            "ip_range": ipr,
+            "nmap_args": nmap_args,
+            "scan_interval": scan_secs,
+            CONF_ARP_PROVIDER: provider,
+
+            # OPNsense (only if used)
+            "opnsense_url": opn_url,
+            "opnsense_key": opn_key,
+            "opnsense_secret": opn_sec,
+            "opnsense_interface": (user_input.get("opnsense_interface") or "").strip(),
+
+            # AdGuard (only if used)
+            CONF_ADG_URL: ag_url,
+            CONF_ADG_USER: ag_user,
+            CONF_ADG_PASS: ag_pass,
+
+            CONF_ARP_VERIFY_TLS: bool(user_input.get(CONF_ARP_VERIFY_TLS, opts.get(CONF_ARP_VERIFY_TLS, data.get(CONF_ARP_VERIFY_TLS, False)))),
+            "mac_directory_json_text": jtxt,
+            "mac_directory_json_url": (user_input.get("mac_directory_json_url") or "").strip(),
+        })
+
+async def async_get_options_flow(config_entry: ConfigEntry):
+    return NetworkScannerOptionsFlow(config_entry)
