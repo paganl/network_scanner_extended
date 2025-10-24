@@ -7,6 +7,7 @@ import logging
 import re
 from datetime import datetime, timezone
 from ipaddress import ip_network, ip_address
+from .adguard import AdGuardDHCPClient
 
 import nmap
 from aiohttp import ClientError, ClientTimeout, BasicAuth
@@ -30,6 +31,7 @@ from .const import (
     STATUS_IDLE, STATUS_SCANNING, STATUS_ENRICHING, STATUS_OK, STATUS_ERROR,
     PHASE_IDLE, PHASE_ARP, PHASE_NMAP,
     SIGNAL_NSX_UPDATED,
+    CONF_ADG_URL, CONF_ADG_USER, CONF_ADG_PASS,
 )
 
 from .opnsense import OPNsenseARPClient
@@ -184,9 +186,9 @@ class ScanController:
         self._opn_iface: str = ""
 
         # adguard
-        self._ag_url: str = ""
-        self._ag_key: str = ""
-        self._ag_sec: str = ""
+        self._adg_url = ""
+        self._adg_user = ""
+        self._adg_pass = ""
 
         # TLS verify flag (used for both HTTP providers)
         self._verify_tls: bool = False
@@ -240,9 +242,9 @@ class ScanController:
         self._opn_iface = _norm(opts.get("opnsense_interface") or data.get("opnsense_interface"))
 
         # AdGuard
-        self._ag_url = _norm(opts.get("adguard_url") or data.get("adguard_url")).rstrip("/")
-        self._ag_key = _norm(opts.get("adguard_key") or data.get("adguard_key"))
-        self._ag_sec = _norm(opts.get("adguard_secret") or data.get("adguard_secret"))
+        self._adg_url  = _norm(opts.get(CONF_ADG_URL)  or data.get(CONF_ADG_URL))
+        self._adg_user = _norm(opts.get(CONF_ADG_USER) or data.get(CONF_ADG_USER))
+        self._adg_pass = _norm(opts.get(CONF_ADG_PASS) or data.get(CONF_ADG_PASS))
 
         # TLS verify
         self._verify_tls = bool(opts.get(CONF_ARP_VERIFY_TLS, data.get(CONF_ARP_VERIFY_TLS, False)))
@@ -276,21 +278,16 @@ class ScanController:
         try:
             # -------- Phase 1: ARP provider --------
             arp_map: Dict[str, Dict[str, Any]] = {}
-            if self._arp_provider == ARP_PROVIDER_OPNSENSE and self._opn_url and self._opn_key and self._opn_sec:
-                try:
-                    client = OPNsenseARPClient(self._opn_url, self._opn_key, self._opn_sec, verify_tls=self._verify_tls)
-                    pairs = await client.fetch_map(self.hass)  # {ip: mac}
-                    arp_map = self._arp_pairs_to_devices(pairs)
-                except Exception as exc:
-                    _LOGGER.warning("OPNsense ARP fetch failed: %s", exc)
-
-            elif self._arp_provider == ARP_PROVIDER_ADGUARD and self._ag_url and self._ag_key and self._ag_sec:
-                try:
-                    client = AdGuardARPClient(self._ag_url, self._ag_key, self._ag_sec, verify_tls=self._verify_tls)
-                    pairs = await client.fetch_map(self.hass)   # {ip: mac}
-                    arp_map = self._arp_pairs_to_devices(pairs)
-                except Exception as exc:
-                    _LOGGER.warning("AdGuard fetch failed: %s", exc)
+            try:
+                if self._arp_provider == ARP_PROVIDER_OPNSENSE and self._opn_url and self._opn_key and self._opn_sec:
+                    arp_pairs = await self._fetch_arp_table_opnsense()
+                    arp_map = self._arp_pairs_to_devices(arp_pairs)
+                elif self._arp_provider == ARP_PROVIDER_ADGUARD and self._adg_url and self._adg_user and self._adg_pass:
+                    adg = AdGuardDHCPClient(self._adg_url, self._adg_user, self._adg_pass, verify_tls=self._opn_verify_tls)
+                    arp_pairs = await adg.fetch_map(self.hass)
+                    arp_map = self._arp_pairs_to_devices(arp_pairs)
+            except Exception as exc:
+                _LOGGER.warning("ARP provider fetch failed: %s", exc)
 
             # Filter to configured ranges
             if arp_map and self._cidr_nets:
