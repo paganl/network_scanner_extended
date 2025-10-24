@@ -3,138 +3,98 @@ from __future__ import annotations
 from typing import Dict, Any
 import json
 import logging
-from urllib.parse import urljoin
 
-from aiohttp import ClientError, ClientTimeout, BasicAuth
+from aiohttp import ClientError, ClientTimeout
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 _LOGGER = logging.getLogger(__name__)
 
-def _clean_mac(mac: str | None) -> str:
-    s = (mac or "").upper()
-    return s if s and s != "(INCOMPLETE)" and s != "00:00:00:00:00:00" else ""
+def _uc(s: str | None) -> str:
+    return (s or "").upper()
 
-def _ensure_control_base(base: str) -> str:
-    # AdGuard Home API base is typically /control/*
-    base = (base or "").rstrip("/")
-    return base if base.endswith("/control") else base + "/control"
-
-class AdGuardARPClient:
+class AdGuardDHCPClient:
     """
-    Fetch IP→MAC mappings from AdGuard Home:
-      1) /control/dhcp/status (if DHCP is enabled)
-      2) fallback: /control/clients (runtime clients list)
-    Basic Auth with admin key/secret (username/password) is supported.
+    Minimal AdGuard Home client:
+      1) POST /control/login { name, password } -> { token }
+      2) GET  /control/dhcp/leases           -> [ { ip, mac, hostname? }, ... ]
+         Fallback: GET /control/dhcp/status  -> { leases: [...] }
     """
 
-    def __init__(self, base_url: str, key: str, secret: str, verify_tls: bool = True, timeout: int = 10) -> None:
+    def __init__(self, base_url: str, username: str, password: str, verify_tls: bool = True, timeout: int = 10) -> None:
         self.base_url = (base_url or "").rstrip("/")
-        self.key = key or ""
-        self.secret = secret or ""
+        self.username = username or ""
+        self.password = password or ""
         self.verify_tls = bool(verify_tls)
         self.timeout = ClientTimeout(total=timeout)
-        self._auth = BasicAuth(self.key, self.secret)
+        self._token: str | None = None
+
+    async def _login(self, hass) -> bool:
+        if not self.base_url or not self.username or not self.password:
+            return False
+        session = async_get_clientsession(hass, verify_ssl=self.verify_tls)
+        url = f"{self.base_url}/control/login"
+        try:
+            async with session.post(url, json={"name": self.username, "password": self.password}, timeout=self.timeout) as resp:
+                if resp.status >= 400:
+                    txt = await resp.text()
+                    raise RuntimeError(f"HTTP {resp.status}: {txt[:200]!r}")
+                data = json.loads(await resp.text())
+                tok = data.get("token")
+                if not tok:
+                    raise RuntimeError("No token in login response")
+                self._token = tok
+                return True
+        except (ClientError, RuntimeError, json.JSONDecodeError) as exc:
+            _LOGGER.warning("AdGuard login failed at %s: %s", url, exc)
+            self._token = None
+            return False
+
+    async def _get_json(self, hass, path: str) -> Any:
+        if not self._token:
+            ok = await self._login(hass)
+            if not ok:
+                return None
+        session = async_get_clientsession(hass, verify_ssl=self.verify_tls)
+        url = f"{self.base_url}{path}"
+        headers = {"Authorization": f"Bearer {self._token}"}
+        try:
+            async with session.get(url, headers=headers, timeout=self.timeout) as resp:
+                if resp.status == 401:
+                    # token expired; retry once
+                    if await self._login(hass):
+                        return await self._get_json(hass, path)
+                    return None
+                if resp.status >= 400:
+                    return None
+                txt = await resp.text()
+            return json.loads(txt)
+        except (ClientError, json.JSONDecodeError):
+            return None
 
     async def fetch_map(self, hass) -> Dict[str, str]:
-        if not self.base_url or not self.key or not self.secret:
-            return {}
+        """Return { ip: MAC } from DHCP leases."""
+        # Prefer explicit leases endpoint
+        data = await self._get_json(hass, "/control/dhcp/leases")
+        leases: list[dict] | None = None
+        if isinstance(data, list):
+            leases = data
+        if leases is None:
+            # Fallback: status wrapper
+            st = await self._get_json(hass, "/control/dhcp/status")
+            if isinstance(st, dict) and isinstance(st.get("leases"), list):
+                leases = st["leases"]
 
-        session = async_get_clientsession(hass, verify_ssl=self.verify_tls)
-        ctrl = _ensure_control_base(self.base_url)
-
-        # 1) DHCP status → leases (preferred)
-        try:
-            leases_url = urljoin(ctrl + "/", "dhcp/status")
-            async with session.get(leases_url, auth=self._auth, timeout=self.timeout) as resp:
-                if resp.status < 400:
-                    data = json.loads(await resp.text())
-                    m = self._parse_dhcp_status(data)
-                    if m:
-                        _LOGGER.debug("AdGuard: parsed %d leases from DHCP status", len(m))
-                        return m
-        except (ClientError, json.JSONDecodeError) as exc:
-            _LOGGER.debug("AdGuard: dhcp/status unusable: %s", exc)
-        except Exception as exc:
-            _LOGGER.debug("AdGuard: dhcp/status unexpected: %s", exc)
-
-        # 2) Fallback: clients list (runtime)
-        try:
-            clients_url = urljoin(ctrl + "/", "clients")
-            async with session.get(clients_url, auth=self._auth, timeout=self.timeout) as resp:
-                if resp.status < 400:
-                    data = json.loads(await resp.text())
-                    m = self._parse_clients(data)
-                    if m:
-                        _LOGGER.debug("AdGuard: parsed %d entries from clients", len(m))
-                        return m
-        except (ClientError, json.JSONDecodeError) as exc:
-            _LOGGER.debug("AdGuard: clients unusable: %s", exc)
-        except Exception as exc:
-            _LOGGER.debug("AdGuard: clients unexpected: %s", exc)
-
-        _LOGGER.warning("AdGuard: no usable endpoint returned data at %s", self.base_url)
-        return {}
-
-    # -------- parsing --------
-
-    def _parse_dhcp_status(self, data: Any) -> Dict[str, str]:
-        """
-        AdGuard openapi describes /dhcp/status payload with leases lists.
-        We accept both v4/v6 sections and different shapes.
-        Returns {ip: MAC}
-        """
         out: Dict[str, str] = {}
+        if not leases:
+            return out
 
-        def grab_list(rows):
-            nonlocal out
-            if isinstance(rows, list):
-                for r in rows:
-                    if not isinstance(r, dict):
-                        continue
-                    ip  = str(r.get("ip") or r.get("IP") or "")
-                    mac = _clean_mac(r.get("mac") or r.get("MAC") or "")
-                    if ip and mac:
-                        out[ip] = mac
-
-        if isinstance(data, dict):
-            # Common nesting:
-            # { "dhcp": { "v4": {..., "leases":[...]}, "v6": {...} } }
-            for key in ("dhcp", "v4", "v6", "leases"):
-                pass
-            dhcp = data.get("dhcp") or data
-            if isinstance(dhcp, dict):
-                for section in ("v4", "v6"):
-                    sec = dhcp.get(section)
-                    if isinstance(sec, dict):
-                        grab_list(sec.get("leases"))
-                # Some builds flatten leases directly
-                grab_list(dhcp.get("leases"))
-        # Some images return just {"leases":[...]}
-        if not out and isinstance(data, dict) and "leases" in data:
-            grab_list(data.get("leases"))
-
-        return out
-
-    def _parse_clients(self, data: Any) -> Dict[str, str]:
-        """
-        /clients often returns objects with ip_addresses and macs.
-        Map all discovered IPs to the client's MAC where present.
-        """
-        out: Dict[str, str] = {}
-        rows = []
-        if isinstance(data, dict) and "clients" in data:
-            rows = data.get("clients") or []
-        elif isinstance(data, list):
-            rows = data
-        for r in rows:
-            if not isinstance(r, dict):
+        for row in leases:
+            if not isinstance(row, dict):
                 continue
-            mac = _clean_mac(r.get("macs", [None])[0] if isinstance(r.get("macs"), list) else r.get("mac"))
-            if not mac:
-                continue
-            ips = r.get("ip_addresses") or r.get("ips") or []
-            if isinstance(ips, list):
-                for ip in ips:
-                    if isinstance(ip, str) and ip:
-                        out[ip] = mac
+            ip = row.get("ip") or row.get("ip_address")
+            mac = row.get("mac") or row.get("mac_address")
+            if ip and mac:
+                mac_u = _uc(str(mac))
+                if mac_u not in ("(INCOMPLETE)", "00:00:00:00:00:00", "*"):
+                    out[str(ip)] = mac_u
         return out
