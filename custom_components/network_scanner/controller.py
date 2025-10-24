@@ -102,6 +102,57 @@ def _ip_in_any(ip_str: str, nets: List[Tuple[str, object]]) -> bool:
             continue
     return False
 
+def _nmap_scan_ranges(self, cidrs: List[str], nmap_args: str) -> Dict[str, Dict[str, Any]]:
+    """
+    Reuse a single PortScanner to sweep multiple CIDRs sequentially.
+    Runs in executor; safe to block here.
+    """
+    out: Dict[str, Dict[str, Any]] = {}
+    try:
+        nm = nmap.PortScanner()
+    except Exception as exc:
+        _LOGGER.warning("nmap init failed: %s", exc)
+        return out
+
+    for cidr in cidrs:
+        try:
+            nm.scan(hosts=cidr, arguments=nmap_args)
+        except Exception as exc:
+            _LOGGER.warning("nmap scan failed for %s: %s", cidr, exc)
+            continue
+
+        for host in nm.all_hosts():
+            try:
+                node = nm[host]
+                addrs = node.get("addresses", {})
+                ip = addrs.get("ipv4") or addrs.get("ipv6") or ""
+                if not ip:
+                    continue
+                mac = _clean_mac(addrs.get("mac") or "")
+                vendor = "Unknown"
+                ven_map = node.get("vendor", {})
+                if isinstance(ven_map, dict) and mac:
+                    for k, v in ven_map.items():
+                        if _clean_mac(k) == mac:
+                            vendor = v
+                            break
+                hostname = node.hostname() or ""
+                # only take first sighting per IP across ranges
+                if ip not in out:
+                    out[ip] = {
+                        "ip": ip,
+                        "mac": mac,
+                        "vendor": vendor,
+                        "hostname": hostname,
+                        "source": ["nmap"],
+                        "name": "",
+                        "type": "",
+                    }
+            except Exception as exc:
+                _LOGGER.debug("nmap parse skip host %s: %s", host, exc)
+    return out
+
+
 # -------------------- controller --------------------
 
 class ScanController:
@@ -257,12 +308,9 @@ class ScanController:
 
             # -------- Phase 2: nmap (optional) --------
             if self._nmap_args:
-                nmap_map: Dict[str, Dict[str, Any]] = {}
-                for cidr in self._cidr_strings:
-                    chunk = await self.hass.async_add_executor_job(self._scan_cidr_nmap, cidr, self._nmap_args)
-                    for ip, dev in chunk.items():
-                        if ip not in nmap_map:
-                            nmap_map[ip] = dev
+                nmap_map: Dict[str, Dict[str, Any]] = await self.hass.async_add_executor_job(
+                    self._nmap_scan_ranges, self._cidr_strings, self._nmap_args
+                )
 
                 merged = self._merge_nmap_with_existing(nmap_map, arp_map)
                 directory = await self._build_effective_directory()
