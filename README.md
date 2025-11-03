@@ -1,205 +1,306 @@
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-</head>
-<body>
+# Network Scanner Extended
 
-  <h1 align="center">Network Scanner Extended (Home Assistant)</h1>
+A Home Assistant custom integration that discovers devices on your network by combining **ARP/DHCP sources** (e.g., OPNsense, AdGuard Home) with optional **nmap** probing. Results are **merged**, **enriched**, and exposed as a single sensor with a detailed `devices` attribute (Schema **v2**).
 
-  <p align="center">
-    <img alt="Network Scanner Extended" src="images/logo.svg" width="360" />
-  </p>
+> Works well in routed/VLAN environments when your ARP/DHCP source has visibility across segments.
 
-  <p>
-    <strong>Network Scanner Extended</strong> is an unofficial custom integration for
-    Home Assistant that discovers devices across one or more subnets, enriches them with
-    optional ARP and user directory data, and exposes compact sensor entities suitable for
-    dashboards and automations.
-  </p>
+---
 
-  <h2>Features</h2>
-  <ul>
-    <li>Scans one or multiple CIDR ranges (e.g. <code>10.0.0.0/24 10.0.3.0/24</code>).</li>
-    <li><strong>Two-phase scan</strong> (optional): fast ARP via OPNsense, then nmap merge.</li>
-    <li>Attributes include full device list with <em>ip, mac, hostname, vendor, name, type, source</em>.</li>
-    <li>Directory enrichment by MAC from JSON (inline or URL, e.g. <code>/local/devices.json</code>).</li>
-    <li>Manual <em>Scan Now</em> button + configurable auto scan interval (minutes; 0 = manual only).</li>
-    <li>Works locally on your LAN; no cloud calls.</li>
-  </ul>
+## Highlights
 
-  <h2>Requirements</h2>
-  <ul>
-    <li>Home Assistant (any install type).</li>
-    <li><code>nmap</code> binary available to HA if you enable nmap scanning.
-      <br/>The integration uses <em>python-nmap</em> which shells out to the system <code>nmap</code>.
-    </li>
-    <li>(Optional) OPNsense if you want ARP-based discovery across VLANs.</li>
-  </ul>
+* **Multiple providers** (pick one):
 
-  <h2>Why nmap often can’t give MACs on VLANs</h2>
-  <p>
-    nmap discovers hosts using ICMP/TCP/UDP probes (<em>Layer-3</em>). Getting a device’s MAC address
-    requires <em>Layer-2</em> knowledge (ARP/ND), which only exists on the local broadcast domain.
-    When HA is on VLAN A and you scan VLAN B, packets traverse a router; HA cannot see VLAN B’s ARP
-    traffic, so nmap returns hosts but usually <em>without MAC addresses</em>. That’s why this
-    integration can use an ARP provider (your router/firewall) to obtain correct IP→MAC mappings
-    across VLANs, then merge them with nmap results.
-  </p>
+  * **OPNsense** ARP table (API)
+  * **AdGuard Home** DHCP/clients (HTTP API)
+  * *(Optional / planned)* UniFi Controller for Wi-Fi metadata
+* **nmap** (optional) ping sweep to find additional hosts & vendor/hostname
+* **Schema v2** device records with optional fields (RSSI, VLAN, tags, notes, etc.)
+* **MAC Directory v2** for human-friendly overrides (names, types, tags, notes)
+* A **“Scan Now”** button + periodic auto scans
+* Safe, non-blocking updates using Home Assistant’s dispatcher
 
-  <h2>Installation</h2>
-  <h3>Manual</h3>
-  <ol>
-    <li>Copy the folder <code>custom_components/network_scanner_extended/</code> into your
-        Home Assistant <code>config/custom_components/</code> directory.</li>
-    <li>Restart Home Assistant.</li>
-    <li>Go to <em>Settings → Devices &amp; Services → Add Integration</em> and search
-        for “Network Scanner Extended”.</li>
-  </ol>
+---
 
-  <h3>HACS (optional)</h3>
-  <ol>
-    <li>Add this repository to HACS as a custom repository.</li>
-    <li>Install, then restart Home Assistant.</li>
-    <li>Add the integration from <em>Devices &amp; Services</em>.</li>
-  </ol>
+## Requirements
 
-  <h2>Configuration (in the UI)</h2>
-  <ul>
-    <li><strong>IP Range</strong> — One or more CIDRs separated by space or comma
-      (e.g. <code>10.0.0.0/24, 10.0.3.0/24</code>).</li>
-    <li><strong>Scan Interval (minutes)</strong> — <code>0</code> disables auto-scan; use the button to scan manually.</li>
-    <li><strong>nmap args</strong> — Default:
-      <code>-sn -PE -PS22,80,443 -PA80,443 -PU53 -T4</code>.
-      <br/>This is a fast “ping” sweep using multiple probe types to improve detection across subnets.
-    </li>
-    <li><strong>ARP Provider</strong> — <code>none</code> or <code>opnsense</code>.</li>
-    <li><strong>OPNsense URL</strong> — e.g. <code>http://10.0.0.2</code> (base URL, no trailing slash)</li>
-    <li><strong>OPNsense Key / Secret</strong> — API credentials.</li>
-    <li><strong>OPNsense Interface</strong> — Optional. If set, the ARP API is filtered server-side to one interface.</li>
-    <li><strong>Directory JSON (text)</strong> — Paste a JSON map keyed by MAC to enrich device names/types.</li>
-    <li><strong>Directory JSON URL</strong> — Or host the same JSON at a URL (e.g. <code>http://HA-IP:8123/local/devices.json</code>).</li>
-  </ul>
+* Home Assistant 2024.8+ (recommended)
+* `python-nmap` (installed via manifest)
+* For providers:
 
-  <h3>Directory JSON schema (enrichment)</h3>
-  <p>The integration accepts either a flat map or an object map, optionally wrapped in <code>data</code>:</p>
-  <pre><code>{
-  "AA:BB:CC:DD:EE:FF": "Kitchen Display",
-  "11:22:33:44:55:66": { "name": "Paul’s iPhone", "desc": "User VLAN" }
-}</code></pre>
-  <p>Or:</p>
-  <pre><code>{
-  "data": {
-    "AA:BB:CC:DD:EE:FF": "Kitchen Display",
-    "11:22:33:44:55:66": { "name": "Paul’s iPhone", "desc": "User VLAN" }
+  * **OPNsense**: API key & secret, API reachable from HA
+  * **AdGuard Home**: UI/HTTP username & password, HTTP reachable from HA
+
+---
+
+## Installation
+
+1. Copy the integration into:
+
+   ```
+   config/custom_components/network_scanner/
+   ```
+2. Restart Home Assistant.
+3. In **Settings → Devices & Services** click **Add Integration** → search for **Network Scanner Extended**.
+
+> If upgrading from an older fork with a different domain/folder, remove the old one first.
+
+---
+
+## Configuration
+
+### Quick Start
+
+1. **IP ranges** (CIDRs): e.g. `10.0.0.0/24, 10.0.1.0/24`
+2. **nmap args** (optional): defaults to
+
+   ```
+   -sn -PE -PS22,80,443 -PA80,443 -PU53 -T4
+   ```
+
+   Set **scan interval (min)** to `0` if you only want manual scans.
+3. **Provider**: choose **OPNsense** or **AdGuard Home** and fill in credentials/URL.
+4. Optionally set **MAC Directory** JSON (inline or URL) for naming/typing devices.
+5. Save. Use the **Scan Now** button or wait for the next interval.
+
+### Providers
+
+#### OPNsense (ARP)
+
+* **URL**: e.g. `https://10.0.0.2`
+* **Key/Secret**: API key pair
+* **Interface**: optional (e.g. `lan`, `vlan30`)
+* **Verify TLS**: enable if you use a valid certificate (disable for self-signed)
+
+The integration tries `/api/diagnostics/interface/search_arp` (and a few variants). If you can curl it successfully, HA should work with the same base URL/creds.
+
+#### AdGuard Home (DHCP/Clients)
+
+* **URL**: e.g. `http://10.2.0.3:3000`
+* **User/Pass**: AdGuard UI credentials
+* Endpoints used (in order):
+
+  1. `/control/dhcp/status` (preferred; merges `leases` and `static_leases`)
+  2. `/control/dhcp/leases` (fallback)
+  3. `/control/clients` (last resort; may miss MACs)
+
+> If you run AdGuard add-on in HA: the HTTP port shown in AdGuard’s “About” page (e.g. `45158`) might be different from the docker-exposed port (e.g. `3000`). Use whichever **works with curl**.
+
+---
+
+## Entities
+
+* **Sensor**: `sensor.network_scanner`
+
+  * `state`: device count
+  * `attributes`:
+
+    * `status`: `idle | scanning | enriching | ok | error`
+    * `phase`: `idle | arp | nmap`
+    * `last_scan_started`, `last_scan_finished` (ISO 8601)
+    * `devices`: list of **Schema v2** records (see below)
+
+* **Sensor (status)**: `sensor.network_scanner_status`
+  Diagnostic mirror of status/timing/metrics.
+
+* **Button**: `button.network_scanner_scan_now`
+  Immediate scan (works regardless of auto-scan interval).
+
+---
+
+## Device Schema (v2)
+
+Every entry in `attributes.devices` is a merged, normalized record. Not every field is always present.
+
+| Field        | Type          | Example                    | Notes                                     |
+| ------------ | ------------- | -------------------------- | ----------------------------------------- |
+| `ip`         | string        | `"10.0.0.42"`              | IP at time of scan (IP-keyed merge).      |
+| `mac`        | string        | `"AA:BB:CC:DD:EE:FF"`      | Upper-case, normalized.                   |
+| `hostname`   | string        | `"laptop.local"`           | From nmap/ARP when available.             |
+| `vendor`     | string        | `"Apple, Inc."`            | From nmap vendor map (needs MAC).         |
+| `name`       | string        | `"Paul’s MacBook"`         | **Override** from MAC Directory.          |
+| `type`       | string        | `"Laptop"`                 | **Override** from MAC Directory (`desc`). |
+| `source`     | string[]      | `["arp","nmap","adguard"]` | Union of providers.                       |
+| `first_seen` | ISO8601       | `"2025-10-24T12:01:33Z"`   | When first observed.                      |
+| `last_seen`  | ISO8601       | `"2025-10-24T12:05:02Z"`   | Updated each scan.                        |
+| `is_wired`   | bool | null   | `false`                    | From UniFi (planned).                     |
+| `ssid`       | string | null | `"Home-24"`                | From UniFi (planned).                     |
+| `ap_name`    | string | null | `"Landing-AP"`             | From UniFi (planned).                     |
+| `rssi`       | number | null | `-58`                      | From UniFi (planned).                     |
+| `vlan`       | number | null | `30`                       | From UniFi/provider when available.       |
+| `tags`       | string[]      | `["work","primary"]`       | From MAC Directory.                       |
+| `notes`      | string | null | `"Do not block"`           | From MAC Directory.                       |
+
+**Backwards compatibility**: v1 fields remain (`ip`, `mac`, `hostname`, `vendor`, `name`, `type`, `source`). `source` is always a list in v2.
+
+---
+
+## MAC Directory (v2)
+
+Use a MAC → data map to label devices. You can paste JSON into the options page or point to a URL. All MAC keys are case-insensitive; they are normalized internally.
+
+Supported shapes:
+
+**Flat:**
+
+```json
+{
+  "11:22:33:44:55:66": "Kitchen Display"
+}
+```
+
+**Object:**
+
+```json
+{
+  "AA:BB:CC:DD:EE:FF": {
+    "name": "Paul’s MacBook",
+    "desc": "Laptop",
+    "tags": ["work", "primary"],
+    "notes": "Pinned to VLAN30"
   }
-}</code></pre>
+}
+```
 
-  <h3>Serving JSON from your HA filesystem</h3>
-  <p>
-    Any file under <code>&lt;config&gt;/www/</code> is publicly available under
-    <code>/local/</code>. Example:
-  </p>
-  <ul>
-    <li>File: <code>&lt;config&gt;/www/devices.json</code></li>
-    <li>URL: <code>http://&lt;HA_IP&gt;:8123/local/devices.json</code></li>
-  </ul>
+**Wrapped:**
 
-  <h2>How it works (async, two-phase)</h2>
-  <ol>
-    <li><strong>Phase 1 — ARP (optional):</strong> If ARP provider = OPNsense, the integration calls
-      <code>/api/diagnostics/interface/search_arp</code> with your key/secret, parses the ARP table, filters it to the configured
-      IP ranges, enriches with your directory JSON, and <em>publishes immediately</em> with status
-      <code>enriching</code> (phase <code>arp</code>).
-    </li>
-    <li><strong>Phase 2 — nmap (optional):</strong> Each configured CIDR is scanned with the chosen
-      nmap arguments. Results are merged with ARP (filling in missing MACs where available),
-      then enriched again by directory JSON. Final state is published with status <code>ok</code>
-      (phase <code>nmap</code>).
-    </li>
-  </ol>
-  <p>
-    If <strong>Scan Interval = 0</strong>, auto-scans are disabled. Use the
-    <em>Scan Now</em> button entity to run a scan on demand.
-  </p>
+```json
+{
+  "data": {
+    "AA:BB:CC:DD:EE:FF": {
+      "name": "Paul’s MacBook",
+      "desc": "Laptop"
+    }
+  }
+}
+```
 
-  <h2>Entities created</h2>
+**Field mapping:**
 
-  <h3>Sensor: <code>Network Scanner Extended</code></h3>
-  <ul>
-    <li><strong>State:</strong> number of devices.</li>
-    <li><strong>Attributes:</strong>
-      <ul>
-        <li><code>status</code> — <code>idle | scanning | enriching | ok | error</code></li>
-        <li><code>phase</code> — <code>idle | arp | nmap</code></li>
-        <li><code>ip_ranges</code> — list of CIDRs</li>
-        <li><code>nmap_args</code>, <code>scan_interval</code></li>
-        <li><code>last_scan_started</code>, <code>last_scan_finished</code> (ISO timestamps)</li>
-        <li><code>counts_by_segment</code>, <code>counts_by_source</code></li>
-        <li><code>devices</code> — array of:
-          <pre><code>{
-  "ip": "10.0.3.24",
-  "mac": "F0:05:1B:14:6A:A3",
-  "hostname": "Pauls-Z-Flip6",
-  "vendor": "Samsung Electronics Co.,Ltd",
-  "name": "Paul’s Phone",     // from directory JSON if provided
-  "type": "USER",             // from directory JSON (desc) if provided
-  "source": ["arp","nmap"]    // which sources saw it
-}</code></pre>
-        </li>
-      </ul>
-    </li>
-  </ul>
+* `name` → device `name`
+* `desc` → device `type`
+* `tags` (array) → device `tags`
+* `notes` → device `notes`
 
-  <h3>Sensor: <code>Network Scanner Extended Status</code></h3>
-  <ul>
-    <li><strong>State:</strong> <code>idle | scanning | enriching | ok | error</code>.</li>
-    <li>Attributes mirror the status-related attributes listed above.</li>
-  </ul>
+---
 
-  <h3>Button: <code>Scan Now</code></h3>
-  <ul>
-    <li>Triggers an immediate two-phase scan regardless of the configured scan interval.</li>
-  </ul>
+## Tips & Examples
 
-  <h2>Defaults &amp; recommendations</h2>
-  <ul>
-    <li><strong>nmap args default:</strong>
-      <code>-sn -PE -PS22,80,443 -PA80,443 -PU53 -T4</code> — a lean “host discovery” sweep:
-      <ul>
-        <li><code>-sn</code> host discovery only (no port scans).</li>
-        <li><code>-PE</code> ICMP Echo, <code>-PS</code> TCP SYN, <code>-PA</code> TCP ACK, <code>-PU</code> UDP 53.</li>
-        <li><code>-T4</code> faster timing.</li>
-      </ul>
-      Tune this if your network blocks certain probes (e.g. drop <code>-PE</code> if ICMP is filtered).
-    </li>
-    <li>If you have multiple VLANs, enable the OPNsense ARP provider for accurate MACs across segments.</li>
-    <li>Set a scan interval that fits your environment. nmap over large ranges can take minutes; 10–30 minutes is typical. Set to 0 for manual only.</li>
-  </ul>
+### CIDR examples
 
-  <h2>Troubleshooting</h2>
-  <ul>
-    <li><strong>No MACs on other VLANs:</strong> Enable the OPNsense ARP provider (and optionally set the interface). nmap alone cannot see L2 info across VLANs.</li>
-    <li><strong>OPNsense returns HTML / 302:</strong> Use the <em>API</em> endpoint:
-      <code>/api/diagnostics/interface/search_arp</code>. Provide API Key/Secret. The base URL should be like
-      <code>http://10.0.0.2</code> or <code>https://10.0.0.2</code> (no trailing slash). Self-signed certs are handled.</li>
-    <li><strong>nmap “not found”:</strong> Ensure the <code>nmap</code> binary is installed in the HA environment.</li>
-    <li><strong>Directory JSON not applied:</strong> Validate JSON format, check MAC capitalization and colon format
-      (e.g. <code>AA:BB:CC:DD:EE:FF</code>), and if using a URL under <code>www/</code> use
-      <code>http://&lt;HA_IP&gt;:8123/local/devices.json</code>.</li>
-    <li><strong>Long scans “took longer than interval”:</strong> Increase the scan interval minutes, reduce the number of CIDRs,
-      or rely more on ARP phase for quick visibility.</li>
-  </ul>
+* Single /24: `10.0.0.0/24`
+* Multiple ranges: `10.0.0.0/24,10.0.1.0/24`
+* Whole 10/8 (big!): `10.0.0.0/8` *(expect long scans)*
 
-  <h2>Privacy &amp; security</h2>
-  <ul>
-    <li>All discovery runs locally on your network.</li>
-    <li>OPNsense API credentials are stored in Home Assistant’s config storage. Treat them as secrets.</li>
-    <li>Files under <code>/local/</code> (i.e. <code>config/www</code>) are publicly readable to anyone who can reach your HA URL.</li>
-  </ul>
+### “nmap only” vs “ARP/DHCP only”
 
-  <h2>License</h2>
-  <p>MIT</p>
+* **ARP/DHCP only**: leave nmap args empty in options
+* **nmap only**: set provider to `none` and provide ranges
 
-</body>
-</html>
+### Manual-only scans
+
+Set **scan interval** to `0` and use the **Scan Now** button.
+
+---
+
+## Troubleshooting
+
+### “No devices added” but provider shows devices
+
+* Confirm provider with `curl`:
+
+  * **OPNsense**
+
+    ```bash
+    curl -ksu KEY:SECRET https://10.0.0.2/api/diagnostics/interface/search_arp
+    ```
+  * **AdGuard Home** (try all)
+
+    ```bash
+    curl -sS -u user:pass http://ADG:PORT/control/dhcp/status
+    curl -sS -u user:pass http://ADG:PORT/control/dhcp/leases
+    curl -sS -u user:pass http://ADG:PORT/control/clients
+    ```
+* If curl works but HA returns nothing:
+
+  * Check **URL/port** matches your working curl.
+  * Toggle **Verify TLS** off for self-signed HTTPS.
+  * Ensure your **IP ranges** actually include the devices (the integration filters provider data to the configured CIDRs).
+
+### “Scan button doesn’t update the sensor”
+
+* Make sure you updated to the dispatcher-based sensor. Entities should update immediately after each phase. If stuck, reload the integration from **Settings → Devices & Services** (three-dot menu → Reload).
+
+### “Detected calls from thread other than the event loop”
+
+* Ensure you’re on current code. The integration uses `loop.call_soon_threadsafe` for dispatcher emits and avoids calling HA APIs from executor threads.
+
+### Logging
+
+Add this to `configuration.yaml` to increase verbosity:
+
+```yaml
+logger:
+  default: warning
+  logs:
+    custom_components.network_scanner: debug
+    custom_components.network_scanner.controller: debug
+    custom_components.network_scanner.opnsense: debug
+    custom_components.network_scanner.adguard: debug
+```
+
+Restart HA and check **Settings → System → Logs**.
+
+---
+
+## Known Limitations
+
+* IP-keyed merge can duplicate the same MAC if it changes IP within a scan window (rare).
+* nmap accuracy varies by network, firewalls, and host OS.
+* AdGuard `/control/clients` may not provide MACs in all setups; use DHCP endpoints or OPNsense when possible.
+* UniFi enrichment is planned; fields appear when provider is enabled and data is available.
+
+---
+
+## FAQ
+
+**Q: Can I keep my old template sensor?**
+A: You shouldn’t need it. The primary sensor exposes `devices` directly. If you have a legacy dashboard, you can down-map v2 fields.
+
+**Q: Do I need to enable both provider and nmap?**
+A: No. You can use provider-only (fast & cross-VLAN) or nmap-only (slower) or both (best coverage).
+
+**Q: My AdGuard add-on shows port 45158 but curl works on 3000 — which is it?**
+A: Use whichever port works with curl from your HA container/host. The integration just uses the URL you provide.
+
+---
+
+## Development Notes
+
+* Domain: `network_scanner`
+* Platforms: `sensor`, `button`
+* Dispatcher signal: `network_scanner_extended_updated`
+* Schema v2 maintained in controller; MAC Directory v2 parsed with support for flat/object/wrapped inputs.
+
+---
+
+## Changelog (highlights)
+
+* **v0.10.x**: AdGuard provider; dispatcher-based updates; Schema v2; MAC Directory v2; thread-safe fixes.
+* **Earlier**: OPNsense provider; options flow; scan button; nmap integration.
+
+---
+
+## License
+
+MIT
+
+---
+
+## Credits
+
+* Inspired by community scanners and extended for multi-provider enrichment.
+* Thanks to testers for logs, ranges, and edge-case endpoints.
+
+---
+
+If you want me to tailor the README to your exact repo structure (badges, screenshots, example dashboards), just share the preferred titles/links and I’ll add them.
