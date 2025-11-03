@@ -14,7 +14,7 @@ from .const import (
     DOMAIN,
     # Common
     DEFAULT_IP_RANGE,
-    DEFAULT_SCAN_INTERVAL,
+    DEFAULT_SCAN_INTERVAL_MINUTES,
     DEFAULT_NMAP_ARGS,
     # ARP provider choice
     CONF_ARP_PROVIDER,
@@ -44,6 +44,16 @@ _LOGGER = logging.getLogger(__name__)
 # ---------- helpers ----------
 
 _FORBIDDEN_NMAP_CHARS = re.compile(r"[;&|`$><]")
+
+def _coerce_minutes(val, default_mins: int) -> int:
+    try:
+        if val in (None, ""): return default_mins
+        m = int(round(float(val)))
+        if m < 0: m = 0
+        if m > 1440: m = 1440
+        return m
+    except Exception:
+        return default_mins
 
 def _secs_to_minutes(secs: int | None) -> int:
     if not isinstance(secs, int) or secs < 0:
@@ -130,8 +140,7 @@ class NetworkScannerConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_user(self, user_input=None):
         """Step 1: core settings + provider pick + UniFi enrichment fields."""
         # Suggested minutes from defaults
-        current_secs = DEFAULT_SCAN_INTERVAL
-        current_mins = _secs_to_minutes(current_secs)
+       mins = DEFAULT_SCAN_INTERVAL_MINUTES
 
         schema = vol.Schema({
             vol.Required("ip_range",
@@ -180,9 +189,7 @@ class NetworkScannerConfigFlow(ConfigFlow, domain=DOMAIN):
             errors["ip_range"] = "invalid_ip_range"
 
         # Minutes
-        mins = user_input.get("scan_interval_minutes", current_mins)
-        if not isinstance(mins, int) or mins < 0 or mins > 1440:
-            errors["scan_interval_minutes"] = "invalid_scan_interval"
+        mins = _coerce_minutes(user_input.get("scan_interval_minutes"), suggested_mins)
 
         # nmap args
         nmap_args = (user_input.get("nmap_args") or DEFAULT_NMAP_ARGS).strip()
@@ -390,9 +397,7 @@ class NetworkScannerOptionsFlow(OptionsFlow):
         if not cidrs or any(_cidr_bad(c) for c in cidrs):
             errors["ip_range"] = "invalid_ip_range"
 
-        mins = user_input.get("scan_interval_minutes", saved_mins)
-        if not isinstance(mins, int) or mins < 0 or mins > 1440:
-            errors["scan_interval_minutes"] = "invalid_scan_interval"
+        mins = _coerce_minutes(user_input.get("scan_interval_minutes", saved_mins), saved_mins)
 
         nmap_args = (user_input.get("nmap_args") or opts.get("nmap_args") or DEFAULT_NMAP_ARGS).strip()
         if _nmap_args_invalid(nmap_args):
