@@ -6,7 +6,7 @@ DOMAIN: str = "network_scanner"
 # --- Defaults ---
 DEFAULT_IP_RANGE = ""  # empty -> skip nmap entirely
 DEFAULT_NMAP_ARGS = "-sn -PE -PS22,80,443 -PA80,443 -PU53 -T4"
-DEFAULT_SCAN_INTERVAL = 240  # seconds
+DEFAULT_SCAN_INTERVAL_MINUTES = 4  # minutes
 
 # --- Providers ---
 CONF_ARP_PROVIDER = "arp_provider"
