@@ -47,23 +47,16 @@ _FORBIDDEN_NMAP_CHARS = re.compile(r"[;&|`$><]")
 
 def _coerce_minutes(val, default_mins: int) -> int:
     try:
-        if val in (None, ""): return default_mins
+        if val in (None, ""):
+            return default_mins
         m = int(round(float(val)))
-        if m < 0: m = 0
-        if m > 1440: m = 1440
+        if m < 0:
+            m = 0
+        if m > 1440:
+            m = 1440
         return m
     except Exception:
         return default_mins
-
-def _secs_to_minutes(secs: int | None) -> int:
-    if not isinstance(secs, int) or secs < 0:
-        return 0
-    return max(0, round(secs / 60))
-
-def _minutes_to_secs(mins: int | None, default_secs: int) -> int:
-    if not isinstance(mins, int) or mins < 0:
-        return default_secs
-    return 0 if mins == 0 else mins * 60
 
 def _split_cidrs(s: str) -> list[str]:
     return [p.strip() for p in re.split(r"[,\s]+", s or "") if p.strip()]
@@ -134,21 +127,17 @@ class NetworkScannerConfigFlow(ConfigFlow, domain=DOMAIN):
     """
     VERSION = 2
 
-    # temporary holder between steps
-    _common: Dict[str, Any] | None = None
+    _common: Dict[str, Any] | None = None  # temp between steps
 
     async def async_step_user(self, user_input=None):
         """Step 1: core settings + provider pick + UniFi enrichment fields."""
-        # Suggested minutes from defaults
-       mins = DEFAULT_SCAN_INTERVAL_MINUTES
-
         schema = vol.Schema({
             vol.Required("ip_range",
                 description={"suggested_value": DEFAULT_IP_RANGE}): str,
             vol.Optional("nmap_args",
                 description={"suggested_value": DEFAULT_NMAP_ARGS}): str,
             vol.Optional("scan_interval_minutes",
-                description={"suggested_value": current_mins}): MinutesNumberSelector(),
+                description={"suggested_value": DEFAULT_SCAN_INTERVAL_MINUTES}): MinutesNumberSelector(),
 
             # ARP provider choice
             vol.Optional(CONF_ARP_PROVIDER,
@@ -189,7 +178,7 @@ class NetworkScannerConfigFlow(ConfigFlow, domain=DOMAIN):
             errors["ip_range"] = "invalid_ip_range"
 
         # Minutes
-        mins = _coerce_minutes(user_input.get("scan_interval_minutes"), suggested_mins)
+        mins = _coerce_minutes(user_input.get("scan_interval_minutes"), DEFAULT_SCAN_INTERVAL_MINUTES)
 
         # nmap args
         nmap_args = (user_input.get("nmap_args") or DEFAULT_NMAP_ARGS).strip()
@@ -207,7 +196,7 @@ class NetworkScannerConfigFlow(ConfigFlow, domain=DOMAIN):
             u_url = (user_input.get(CONF_UNIFI_URL) or "").strip()
             if u_url and not u_url.startswith(("http://", "https://")):
                 errors[CONF_UNIFI_URL] = "invalid_url"
-            # no strict requirement here; controller will log if creds missing
+            # credentials are optional here; controller can warn
 
         if errors:
             return self.async_show_form(step_id="user", data_schema=schema, errors=errors)
@@ -216,7 +205,7 @@ class NetworkScannerConfigFlow(ConfigFlow, domain=DOMAIN):
         self._common = {
             "ip_range": ipr,
             "nmap_args": nmap_args,
-            "scan_interval": _minutes_to_secs(mins, DEFAULT_SCAN_INTERVAL),
+            "scan_interval_minutes": mins,  # store MINUTES
 
             "mac_directory": _build_dir(jtxt),
             "mac_directory_json_url": (user_input.get("mac_directory_json_url") or "").strip(),
@@ -326,8 +315,9 @@ class NetworkScannerOptionsFlow(OptionsFlow):
         data = self.entry.data or {}
         opts = self.entry.options or {}
 
-        saved_secs = opts.get("scan_interval", data.get("scan_interval", DEFAULT_SCAN_INTERVAL))
-        saved_mins = _secs_to_minutes(saved_secs)
+        saved_mins = opts.get("scan_interval_minutes",
+                              data.get("scan_interval_minutes",
+                                       DEFAULT_SCAN_INTERVAL_MINUTES))
         prov = opts.get(CONF_ARP_PROVIDER, data.get(CONF_ARP_PROVIDER, DEFAULT_ARP_PROVIDER))
 
         schema_dict: Dict[Any, Any] = {
@@ -344,7 +334,7 @@ class NetworkScannerOptionsFlow(OptionsFlow):
                 description={"suggested_value": opts.get(CONF_ARP_VERIFY_TLS, data.get(CONF_ARP_VERIFY_TLS, False))}): bool,
 
             vol.Optional("mac_directory_json_text",
-                description={"suggested_value": opts.get("mac_directory_json_text", "")}): TextSelector(),
+                description={"suggested_value": opts.get("mac_directory_json_text", data.get("mac_directory_json_text", ""))}): TextSelector(),
             vol.Optional("mac_directory_json_url",
                 description={"suggested_value": opts.get("mac_directory_json_url", data.get("mac_directory_json_url", ""))}): str,
 
@@ -361,7 +351,7 @@ class NetworkScannerOptionsFlow(OptionsFlow):
                 description={"suggested_value": opts.get(CONF_UNIFI_SITE, data.get(CONF_UNIFI_SITE, DEFAULT_UNIFI_SITE))}): str,
         }
 
-        # Provider-specific block (just the fields for the chosen provider)
+        # Provider-specific block (only for chosen provider)
         if prov == "opnsense":
             schema_dict.update({
                 vol.Optional("opnsense_url",
@@ -382,7 +372,6 @@ class NetworkScannerOptionsFlow(OptionsFlow):
                 vol.Optional(CONF_ADG_PASS,
                     description={"suggested_value": "********" if (opts.get(CONF_ADG_PASS) or data.get(CONF_ADG_PASS)) else ""}): str,
             })
-        # prov == "none": no extra fields
 
         schema = vol.Schema(schema_dict)
 
@@ -459,7 +448,7 @@ class NetworkScannerOptionsFlow(OptionsFlow):
         out = {
             "ip_range": ipr,
             "nmap_args": nmap_args,
-            "scan_interval": _minutes_to_secs(mins, DEFAULT_SCAN_INTERVAL),
+            "scan_interval_minutes": mins,
             CONF_ARP_PROVIDER: prov,
             CONF_ARP_VERIFY_TLS: bool(user_input.get(
                 CONF_ARP_VERIFY_TLS,
