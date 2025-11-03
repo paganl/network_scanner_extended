@@ -1,91 +1,79 @@
-# custom_components/network_scanner/unifi.py
+# custom_components/network_scanner/__init__.py
 from __future__ import annotations
-from typing import Dict, Any, Iterable
-import json
-import logging
 
-from aiohttp import ClientError, ClientTimeout
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
+import logging
+from datetime import timedelta
+
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import Platform
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.event import async_track_time_interval
+
+from .const import DOMAIN
+from .controller import ScanController
 
 _LOGGER = logging.getLogger(__name__)
 
-class UniFiClient:
-    """
-    Minimal UniFi Network client (UDM/Network App 7.x/8.x tolerant):
-      - Login with username/password (cookie-based)
-      - Fetch connected clients: /proxy/network/api/s/{site}/stat/sta
-      - Fetch devices (for AP names): /proxy/network/api/s/{site}/stat/device
+PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BUTTON]
+SCAN_TICK = timedelta(seconds=30)  # check interval; controller self-gates by scan_interval
 
-    Notes:
-      * Controller bases often vary; we accept http(s)://host[:port]
-      * Uses the same aiohttp session as HA; respects verify_ssl toggle
-    """
 
-    def __init__(self, base_url: str, username: str, password: str, site: str = "default",
-                 verify_tls: bool = True, timeout: int = 10) -> None:
-        self.base = (base_url or "").rstrip("/")
-        self.user = username or ""
-        self.passwd = password or ""
-        self.site = site or "default"
-        self.verify_tls = bool(verify_tls)
-        self.timeout = ClientTimeout(total=timeout)
-        self._cookie_jar = None
+async def async_setup(hass: HomeAssistant, config: dict) -> bool:
+    # YAML setup not used; just ensure domain bucket exists.
+    hass.data.setdefault(DOMAIN, {})
+    return True
 
-    async def _session(self, hass):
-        return async_get_clientsession(hass, verify_ssl=self.verify_tls)
 
-    async def _login(self, hass) -> bool:
-        """
-        Modern controllers: POST /api/login
-        Legacy: POST /api/auth/login
-        We try both.
-        """
-        sess = await self._session(hass)
-        payload = {"username": self.user, "password": self.passwd}
-        for path in ("/api/login", "/api/auth/login"):
-            try:
-                async with sess.post(self.base + path, json=payload, timeout=self.timeout) as resp:
-                    if resp.status == 200:
-                        _LOGGER.debug("UniFi login ok via %s", path)
-                        return True
-            except ClientError as exc:
-                _LOGGER.debug("UniFi login path %s failed: %s", path, exc)
-        _LOGGER.warning("UniFi login failed at %s", self.base)
-        return False
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    controller = ScanController(hass, entry)
 
-    async def _get_json(self, hass, path: str) -> Any:
-        sess = await self._session(hass)
-        async with sess.get(self.base + path, timeout=self.timeout) as resp:
-            txt = await resp.text()
-            if resp.status >= 400:
-                raise RuntimeError(f"HTTP {resp.status}: {txt[:200]!r}")
-            try:
-                return json.loads(txt)
-            except Exception:
-                raise RuntimeError(f"Non-JSON at {path}: {txt[:120]!r}")
+    hass.data.setdefault(DOMAIN, {})
+    hass.data[DOMAIN][entry.entry_id] = {
+        "controller": controller,
+        "unsub_tick": None,
+        "update_unsub": None,
+    }
 
-    async def fetch_clients(self, hass) -> list[dict]:
-        if not (self.base and self.user and self.passwd):
-            return []
-        ok = await self._login(hass)
-        if not ok:
-            return []
-        path = f"/proxy/network/api/s/{self.site}/stat/sta"
-        try:
-            data = await self._get_json(hass, path)
-            return data.get("data", []) if isinstance(data, dict) else []
-        except Exception as exc:
-            _LOGGER.warning("UniFi fetch clients failed: %s", exc)
-            return []
+    # Forward to platforms
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-    async def fetch_devices(self, hass) -> list[dict]:
-        if not (self.base and self.user and self.passwd):
-            return []
-        # Do not re-login; cookies still in session
-        path = f"/proxy/network/api/s/{self.site}/stat/device"
-        try:
-            data = await self._get_json(hass, path)
-            return data.get("data", []) if isinstance(data, dict) else []
-        except Exception as exc:
-            _LOGGER.debug("UniFi fetch devices failed: %s", exc)
-            return []
+    # Periodic tick: async, runs on HA loop, no thread hops, no async_create_task-from-thread
+    async def _tick(now) -> None:
+        await controller.maybe_auto_scan()
+
+    unsub_tick = async_track_time_interval(hass, _tick, SCAN_TICK)
+    hass.data[DOMAIN][entry.entry_id]["unsub_tick"] = unsub_tick
+    entry.async_on_unload(unsub_tick)
+
+    # Apply changed options without full reload
+    async def _on_options_updated(hass_: HomeAssistant, updated: ConfigEntry) -> None:
+        controller.apply_entry(updated)
+        _LOGGER.debug("network_scanner: options applied to controller")
+
+    update_unsub = entry.add_update_listener(_on_options_updated)
+    hass.data[DOMAIN][entry.entry_id]["update_unsub"] = update_unsub
+    entry.async_on_unload(update_unsub)
+
+    _LOGGER.debug("network_scanner: setup complete for %s", entry.entry_id)
+    return True
+
+
+async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if ok:
+        data = hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
+        if data:
+            # entry.async_on_unload already cleans these up; this is belt-and-braces
+            if data.get("unsub_tick"):
+                try:
+                    data["unsub_tick"]()
+                except Exception:
+                    pass
+            if data.get("update_unsub"):
+                try:
+                    data["update_unsub"]()
+                except Exception:
+                    pass
+        if not hass.data.get(DOMAIN):
+            hass.data.pop(DOMAIN, None)
+    return ok
