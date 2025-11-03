@@ -3,40 +3,47 @@ from __future__ import annotations
 
 DOMAIN: str = "network_scanner"
 
-# Default UI values
-DEFAULT_IP_RANGE = "192.168.1.0/24"
-
-# Default nmap args that work across routed networks (not just ARP)
+# --- Defaults ---
+DEFAULT_IP_RANGE = ""  # empty -> skip nmap entirely
 DEFAULT_NMAP_ARGS = "-sn -PE -PS22,80,443 -PA80,443 -PU53 -T4"
+DEFAULT_SCAN_INTERVAL = 240  # seconds
 
-# Default scan interval in seconds
-DEFAULT_SCAN_INTERVAL = 240
-
-# ARP enrichment settings
-CONF_ARP_PROVIDER   = "arp_provider"
-CONF_ARP_BASE_URL   = "arp_base_url"   # reserved
-CONF_ARP_KEY        = "arp_key"
-CONF_ARP_SECRET     = "arp_secret"
-CONF_ARP_VERIFY_TLS = "arp_verify_tls"
-
-# Providers
-ARP_PROVIDER_NONE      = "none"
-ARP_PROVIDER_OPNSENSE  = "opnsense"
-ARP_PROVIDER_ADGUARD   = "adguard"     # NEW
-ARP_PROVIDERS = [ARP_PROVIDER_NONE, ARP_PROVIDER_OPNSENSE, ARP_PROVIDER_ADGUARD]
+# --- Providers ---
+CONF_ARP_PROVIDER = "arp_provider"
+ARP_PROVIDER_NONE = "none"
+ARP_PROVIDER_OPNSENSE = "opnsense"
+ARP_PROVIDER_ADGUARD = "adguard"
+ARP_PROVIDER_UNIFI = "unifi"
+ARP_PROVIDERS = [
+    ARP_PROVIDER_NONE,
+    ARP_PROVIDER_OPNSENSE,
+    ARP_PROVIDER_ADGUARD,
+    ARP_PROVIDER_UNIFI,
+]
 DEFAULT_ARP_PROVIDER = ARP_PROVIDER_NONE
 
-# OPNsense defaults
-DEFAULT_OPNSENSE_URL   = "http://10.0.0.2"
-DEFAULT_OPNSENSE_IFACE = ""            # optional (e.g. "lan", "vlan30")
-OPNSENSE_ARP_PATH      = "/api/diagnostics/interface/search_arp/"
+# TLS verify toggle for HTTP providers
+CONF_ARP_VERIFY_TLS = "arp_verify_tls"
 
-# AdGuard defaults
-# AdGuard provider config keys
-CONF_ADG_URL  = "adguard_url"
-CONF_ADG_USER = "adguard_username"
-CONF_ADG_PASS = "adguard_password"
-DEFAULT_ADGUARD_URL    = "http://10.2.0.3:3000"  # change to your AGH host/port
+# --- OPNsense ---
+DEFAULT_OPNSENSE_URL = "https://10.0.0.2"
+DEFAULT_OPNSENSE_IFACE = ""  # e.g., "lan"
+# We probe endpoints dynamically; leaving paths here for clarity
+OPNSENSE_ARP_PATH = "/api/diagnostics/interface/search_arp"
+
+# --- AdGuard Home (running in HA or external) ---
+DEFAULT_ADGUARD_URL = "http://127.0.0.1:3000"
+CONF_ADG_URL = "adguard_url"
+CONF_ADG_USER = "adguard_key"      # keep legacy naming to match your flow
+CONF_ADG_PASS = "adguard_secret"
+
+# --- UniFi Network ---
+DEFAULT_UNIFI_URL = "https://unifi.local"
+DEFAULT_UNIFI_SITE = "default"
+CONF_UNIFI_URL = "unifi_url"
+CONF_UNIFI_USER = "unifi_username"
+CONF_UNIFI_PASS = "unifi_password"
+CONF_UNIFI_SITE = "unifi_site"
 
 # Card-friendly status strings
 STATUS_IDLE = "idle"
@@ -47,8 +54,11 @@ STATUS_ERROR = "error"
 
 # Phases
 PHASE_IDLE = "idle"
-PHASE_ARP  = "arp"
+PHASE_ARP = "arp"
 PHASE_NMAP = "nmap"
 
 # Dispatcher signal so sensors can update immediately on publish
 SIGNAL_NSX_UPDATED = "network_scanner_extended_updated"
+
+# Internal schema version (not stored) to track templates/docs
+SCHEMA_VERSION = 2
