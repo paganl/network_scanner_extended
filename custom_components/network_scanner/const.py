@@ -38,6 +38,7 @@ CONF_ADG_USER = "adguard_key"      # keep legacy naming to match your flow
 CONF_ADG_PASS = "adguard_secret"
 
 # --- UniFi Network ---
+CONF_UNIFI_ENABLED = "unifi_enabled"
 DEFAULT_UNIFI_URL = "https://unifi.local"
 DEFAULT_UNIFI_SITE = "default"
 CONF_UNIFI_URL = "unifi_url"
