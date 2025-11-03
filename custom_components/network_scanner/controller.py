@@ -331,7 +331,9 @@ class ScanController:
             except Exception:
                 last = 0.0
         now = datetime.now(timezone.utc).timestamp()
-        if now - last < self._scan_interval_minutes:
+        interval_secs = max(0, int(self._scan_interval_minutes) * 60)
+        
+        if now - last < interval_secs
             return
         await self.scan_now()
 
@@ -423,6 +425,11 @@ class ScanController:
                 self._status = STATUS_ENRICHING
                 self._phase = PHASE_ARP
                 _emit_update(self.hass)
+                
+            _LOGGER.debug(
+                "Phase1 complete: provider=%s devices=%d (mac-keyed=%d, ip-only=%d)",
+                self._arp_provider, len(by_mac) + len(by_ip_fallback), len(by_mac), len(by_ip_fallback)
+            )
 
             # -------- Phase 2: nmap (optional) --------
             if self._cidr_strings:  # only if ranges are set
@@ -608,7 +615,10 @@ class ScanController:
             override = directory.get(mac)
             if not override:
                 continue
-            if override.get("name"):
-                dev["name"] = override["name"]
-            if override.get("desc"):
-                dev["type"] = override["desc"]
+            name = override.get("name")
+            desc = override.get("desc")
+            if name:
+                dev["name"] = name
+            if desc:
+                # Keep 'type' for real device type; store free-text into 'notes'
+                dev.setdefault("notes", desc)
