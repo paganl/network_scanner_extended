@@ -1,47 +1,91 @@
-# custom_components/network_scanner/__init__.py
+# custom_components/network_scanner/unifi.py
 from __future__ import annotations
-from typing import Final
-from datetime import timedelta
+from typing import Dict, Any, Iterable
+import json
+import logging
 
-from homeassistant.core import HomeAssistant
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.helpers.event import async_track_time_interval
+from aiohttp import ClientError, ClientTimeout
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .const import DOMAIN
-from .controller import ScanController
+_LOGGER = logging.getLogger(__name__)
 
-PLATFORMS: Final = ["sensor", "button"]
+class UniFiClient:
+    """
+    Minimal UniFi Network client (UDM/Network App 7.x/8.x tolerant):
+      - Login with username/password (cookie-based)
+      - Fetch connected clients: /proxy/network/api/s/{site}/stat/sta
+      - Fetch devices (for AP names): /proxy/network/api/s/{site}/stat/device
 
-async def async_setup(hass: HomeAssistant, config: dict) -> bool:
-    hass.data.setdefault(DOMAIN, {})
-    return True
+    Notes:
+      * Controller bases often vary; we accept http(s)://host[:port]
+      * Uses the same aiohttp session as HA; respects verify_ssl toggle
+    """
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    controller = ScanController(hass, entry)
-    hass.data[DOMAIN][entry.entry_id] = {
-        "controller": controller,
-        "entry": entry,
-    }
+    def __init__(self, base_url: str, username: str, password: str, site: str = "default",
+                 verify_tls: bool = True, timeout: int = 10) -> None:
+        self.base = (base_url or "").rstrip("/")
+        self.user = username or ""
+        self.passwd = password or ""
+        self.site = site or "default"
+        self.verify_tls = bool(verify_tls)
+        self.timeout = ClientTimeout(total=timeout)
+        self._cookie_jar = None
 
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    async def _session(self, hass):
+        return async_get_clientsession(hass, verify_ssl=self.verify_tls)
 
-    # SAFE interval tick on HA loop, no async_create_task, no threads
-    async def _tick(now) -> None:
-        await controller.maybe_auto_scan()
+    async def _login(self, hass) -> bool:
+        """
+        Modern controllers: POST /api/login
+        Legacy: POST /api/auth/login
+        We try both.
+        """
+        sess = await self._session(hass)
+        payload = {"username": self.user, "password": self.passwd}
+        for path in ("/api/login", "/api/auth/login"):
+            try:
+                async with sess.post(self.base + path, json=payload, timeout=self.timeout) as resp:
+                    if resp.status == 200:
+                        _LOGGER.debug("UniFi login ok via %s", path)
+                        return True
+            except ClientError as exc:
+                _LOGGER.debug("UniFi login path %s failed: %s", path, exc)
+        _LOGGER.warning("UniFi login failed at %s", self.base)
+        return False
 
-    # Run a quick tick every 30s; controller gates internally by scan_interval
-    unsub = async_track_time_interval(hass, _tick, timedelta(seconds=30))
-    entry.async_on_unload(unsub)
+    async def _get_json(self, hass, path: str) -> Any:
+        sess = await self._session(hass)
+        async with sess.get(self.base + path, timeout=self.timeout) as resp:
+            txt = await resp.text()
+            if resp.status >= 400:
+                raise RuntimeError(f"HTTP {resp.status}: {txt[:200]!r}")
+            try:
+                return json.loads(txt)
+            except Exception:
+                raise RuntimeError(f"Non-JSON at {path}: {txt[:120]!r}")
 
-    # Options change -> reload entry
-    entry.async_on_unload(entry.add_update_listener(_async_update_listener))
-    return True
+    async def fetch_clients(self, hass) -> list[dict]:
+        if not (self.base and self.user and self.passwd):
+            return []
+        ok = await self._login(hass)
+        if not ok:
+            return []
+        path = f"/proxy/network/api/s/{self.site}/stat/sta"
+        try:
+            data = await self._get_json(hass, path)
+            return data.get("data", []) if isinstance(data, dict) else []
+        except Exception as exc:
+            _LOGGER.warning("UniFi fetch clients failed: %s", exc)
+            return []
 
-async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    await hass.config_entries.async_reload(entry.entry_id)
-
-async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-    if unload_ok:
-        hass.data[DOMAIN].pop(entry.entry_id, None)
-    return unload_ok
+    async def fetch_devices(self, hass) -> list[dict]:
+        if not (self.base and self.user and self.passwd):
+            return []
+        # Do not re-login; cookies still in session
+        path = f"/proxy/network/api/s/{self.site}/stat/device"
+        try:
+            data = await self._get_json(hass, path)
+            return data.get("data", []) if isinstance(data, dict) else []
+        except Exception as exc:
+            _LOGGER.debug("UniFi fetch devices failed: %s", exc)
+            return []
