@@ -16,7 +16,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_send
 
 from .const import (
     DEFAULT_NMAP_ARGS,
-    DEFAULT_SCAN_INTERVAL,
+    DEFAULT_SCAN_INTERVAL_MINUTES,
     DEFAULT_IP_RANGE,
     CONF_ARP_PROVIDER,
     ARP_PROVIDER_NONE,
@@ -233,7 +233,7 @@ class ScanController:
         self._cidr_strings: List[str] = []
         self._cidr_nets: List[Tuple[str, object]] = []
         self._nmap_args: str = DEFAULT_NMAP_ARGS
-        self._scan_interval: int = DEFAULT_SCAN_INTERVAL
+        self._scan_interval_minutes: int = DEFAULT_SCAN_INTERVAL_MINUTES
         self._arp_provider: str = ARP_PROVIDER_NONE
 
         # providers config
@@ -276,7 +276,7 @@ class ScanController:
     @property
     def nmap_args(self) -> str: return self._nmap_args
     @property
-    def scan_interval(self) -> int: return self._scan_interval
+    def scan_interval_minutes(self) -> int: return self._scan_interval_minutes
     @property
     def phase(self) -> str: return self._phase
 
@@ -296,7 +296,7 @@ class ScanController:
                 _LOGGER.warning("Invalid CIDR in config: %s", c)
 
         self._nmap_args = _norm(opts.get("nmap_args") or data.get("nmap_args") or DEFAULT_NMAP_ARGS)
-        self._scan_interval = int(opts.get("scan_interval", data.get("scan_interval", DEFAULT_SCAN_INTERVAL)))
+        self._scan_interval_minutes = int(opts.get("scan_interval_minutes", data.get("scan_interval_minutes", DEFAULT_SCAN_INTERVAL_MINUTES)))
         self._arp_provider = _norm(opts.get(CONF_ARP_PROVIDER) or data.get(CONF_ARP_PROVIDER) or ARP_PROVIDER_NONE)
 
         # OPNsense
@@ -322,7 +322,7 @@ class ScanController:
 
     # scheduling
     async def maybe_auto_scan(self) -> None:
-        if self._is_scanning or self._scan_interval <= 0:
+        if self._is_scanning or self._scan_interval_minutes <= 0:
             return
         last = 0.0
         if self._last_scan_finished:
@@ -331,7 +331,7 @@ class ScanController:
             except Exception:
                 last = 0.0
         now = datetime.now(timezone.utc).timestamp()
-        if now - last < self._scan_interval:
+        if now - last < self._scan_interval_minutes:
             return
         await self.scan_now()
 
