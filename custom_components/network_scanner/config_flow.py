@@ -1,44 +1,69 @@
 # custom_components/network_scanner/config_flow.py
 from __future__ import annotations
-import json, logging, re
+
+import json
+import logging
+import re
 from ipaddress import ip_network
-from typing import Dict, Any
+from typing import Any, Dict
 
 import voluptuous as vol
 from homeassistant.config_entries import ConfigFlow, OptionsFlow, ConfigEntry
 
 from .const import (
     DOMAIN,
-    DEFAULT_IP_RANGE, DEFAULT_SCAN_INTERVAL, DEFAULT_NMAP_ARGS,
-    CONF_ARP_PROVIDER, ARP_PROVIDERS, DEFAULT_ARP_PROVIDER,
-    # TLS
+    # Common
+    DEFAULT_IP_RANGE,
+    DEFAULT_SCAN_INTERVAL,
+    DEFAULT_NMAP_ARGS,
+    # ARP provider choice
+    CONF_ARP_PROVIDER,
+    ARP_PROVIDERS,
+    DEFAULT_ARP_PROVIDER,
     CONF_ARP_VERIFY_TLS,
     # OPNsense
-    DEFAULT_OPNSENSE_URL, DEFAULT_OPNSENSE_IFACE,
+    DEFAULT_OPNSENSE_URL,
+    DEFAULT_OPNSENSE_IFACE,
     # AdGuard
-    DEFAULT_ADGUARD_URL, CONF_ADG_URL, CONF_ADG_USER, CONF_ADG_PASS,
-    # UniFi
-    DEFAULT_UNIFI_URL, DEFAULT_UNIFI_SITE,
-    CONF_UNIFI_URL, CONF_UNIFI_USER, CONF_UNIFI_PASS, CONF_UNIFI_SITE,
+    DEFAULT_ADGUARD_URL,
+    CONF_ADG_URL,
+    CONF_ADG_USER,
+    CONF_ADG_PASS,
+    # UniFi enrichment (independent of ARP provider)
+    DEFAULT_UNIFI_URL,
+    DEFAULT_UNIFI_SITE,
+    CONF_UNIFI_ENABLED,
+    CONF_UNIFI_URL,
+    CONF_UNIFI_USER,
+    CONF_UNIFI_PASS,
+    CONF_UNIFI_SITE,
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# ---------- helpers ----------
+
 _FORBIDDEN_NMAP_CHARS = re.compile(r"[;&|`$><]")
 
 def _secs_to_minutes(secs: int | None) -> int:
-    if not isinstance(secs, int) or secs < 0: return 0
-    return max(0, round(secs/60))
+    if not isinstance(secs, int) or secs < 0:
+        return 0
+    return max(0, round(secs / 60))
 
 def _minutes_to_secs(mins: int | None, default_secs: int) -> int:
-    if not isinstance(mins, int) or mins < 0: return default_secs
+    if not isinstance(mins, int) or mins < 0:
+        return default_secs
     return 0 if mins == 0 else mins * 60
 
 def _split_cidrs(s: str) -> list[str]:
     return [p.strip() for p in re.split(r"[,\s]+", s or "") if p.strip()]
 
 def _cidr_bad(c: str) -> bool:
-    try: ip_network(c, strict=False); return False
-    except Exception: return True
+    try:
+        ip_network(c, strict=False)
+        return False
+    except Exception:
+        return True
 
 def _is_dir_json(txt: str) -> bool:
     try:
@@ -50,15 +75,17 @@ def _is_dir_json(txt: str) -> bool:
 
 def _build_dir(txt: str) -> dict[str, dict]:
     out: dict[str, dict] = {}
-    if not txt: return out
+    if not txt:
+        return out
     parsed = json.loads(txt)
     block = parsed.get("data", parsed) if isinstance(parsed, dict) else {}
     if isinstance(block, dict):
         for k, v in block.items():
             mk = (k or "").upper()
-            if not mk: continue
+            if not mk:
+                continue
             if isinstance(v, dict):
-                out[mk] = {"name": str(v.get("name","")), "desc": str(v.get("desc",""))}
+                out[mk] = {"name": str(v.get("name", "")), "desc": str(v.get("desc", ""))}
             else:
                 out[mk] = {"name": str(v), "desc": ""}
     return out
@@ -66,76 +93,136 @@ def _build_dir(txt: str) -> dict[str, dict]:
 def _nmap_args_invalid(s: str) -> bool:
     return bool(s and _FORBIDDEN_NMAP_CHARS.search(s))
 
-# selectors
+# ---------- selectors ----------
+
 try:
     from homeassistant.helpers.selector import selector as ha_selector
-    def TextSelector(): return ha_selector({"text": {"multiline": True}})
+
+    def TextSelector():
+        return ha_selector({"text": {"multiline": True}})
+
     def MinutesNumberSelector():
-        return ha_selector({"number": {"min":0,"max":1440,"step":1,"mode":"box","unit_of_measurement":"min"}})
+        return ha_selector({
+            "number": {
+                "min": 0, "max": 1440, "step": 1, "mode": "box",
+                "unit_of_measurement": "min",
+            }
+        })
 except Exception:
     def TextSelector(): return str
     def MinutesNumberSelector(): return int
 
-# ---------------- Config Flow ----------------
+# ======================================================================
+#                              CONFIG FLOW
+# ======================================================================
 
 class NetworkScannerConfigFlow(ConfigFlow, domain=DOMAIN):
-    VERSION = 1
+    """
+    V2 schema:
+      - One ARP provider (none/opnsense/adguard) for IP↔MAC.
+      - UniFi is optional enrichment (independent of ARP provider).
+    """
+    VERSION = 2
+
+    # temporary holder between steps
+    _common: Dict[str, Any] | None = None
 
     async def async_step_user(self, user_input=None):
-        # Step 1: common basics + provider pick
-        yaml_defaults = self.hass.data.get(DOMAIN, {}) or {}
-        current_secs = yaml_defaults.get("scan_interval", DEFAULT_SCAN_INTERVAL)
+        """Step 1: core settings + provider pick + UniFi enrichment fields."""
+        # Suggested minutes from defaults
+        current_secs = DEFAULT_SCAN_INTERVAL
         current_mins = _secs_to_minutes(current_secs)
 
         schema = vol.Schema({
             vol.Required("ip_range",
-                description={"suggested_value": yaml_defaults.get("ip_range", DEFAULT_IP_RANGE)}): str,
+                description={"suggested_value": DEFAULT_IP_RANGE}): str,
             vol.Optional("nmap_args",
                 description={"suggested_value": DEFAULT_NMAP_ARGS}): str,
             vol.Optional("scan_interval_minutes",
                 description={"suggested_value": current_mins}): MinutesNumberSelector(),
-            vol.Required(CONF_ARP_PROVIDER,
+
+            # ARP provider choice
+            vol.Optional(CONF_ARP_PROVIDER,
                 description={"suggested_value": DEFAULT_ARP_PROVIDER}): vol.In(ARP_PROVIDERS),
+
+            # TLS verify (HTTP providers)
             vol.Optional(CONF_ARP_VERIFY_TLS,
                 description={"suggested_value": False}): bool,
-            # Directory (optional)
+
+            # Directory
             vol.Optional("mac_directory_json_text",
                 description={"suggested_value": ""}): TextSelector(),
             vol.Optional("mac_directory_json_url",
                 description={"suggested_value": ""}): str,
+
+            # UniFi enrichment (independent)
+            vol.Optional(CONF_UNIFI_ENABLED,
+                description={"suggested_value": False}): bool,
+            vol.Optional(CONF_UNIFI_URL,
+                description={"suggested_value": DEFAULT_UNIFI_URL}): str,
+            vol.Optional(CONF_UNIFI_USER,
+                description={"suggested_value": ""}): str,
+            vol.Optional(CONF_UNIFI_PASS,
+                description={"suggested_value": ""}): str,
+            vol.Optional(CONF_UNIFI_SITE,
+                description={"suggested_value": DEFAULT_UNIFI_SITE}): str,
         })
 
         if user_input is None:
             return self.async_show_form(step_id="user", data_schema=schema, errors={})
 
-        # validate basics
-        errors: Dict[str,str] = {}
+        errors: Dict[str, str] = {}
+
+        # CIDRs
         ipr = (user_input.get("ip_range") or "").strip()
         cidrs = _split_cidrs(ipr)
-        if any(_cidr_bad(c) for c in cidrs):
+        if not cidrs or any(_cidr_bad(c) for c in cidrs):
             errors["ip_range"] = "invalid_ip_range"
-        mins = user_input.get("scan_interval_minutes")
-        if mins is not None and (mins < 0 or mins > 1440):
+
+        # Minutes
+        mins = user_input.get("scan_interval_minutes", current_mins)
+        if not isinstance(mins, int) or mins < 0 or mins > 1440:
             errors["scan_interval_minutes"] = "invalid_scan_interval"
+
+        # nmap args
         nmap_args = (user_input.get("nmap_args") or DEFAULT_NMAP_ARGS).strip()
         if _nmap_args_invalid(nmap_args):
             errors["nmap_args"] = "invalid_nmap_args"
+
+        # Directory JSON
         jtxt = (user_input.get("mac_directory_json_text") or "").strip()
         if jtxt and not _is_dir_json(jtxt):
             errors["mac_directory_json_text"] = "invalid_json"
 
+        # UniFi basic validation only if enabled
+        unifi_enabled = bool(user_input.get(CONF_UNIFI_ENABLED, False))
+        if unifi_enabled:
+            u_url = (user_input.get(CONF_UNIFI_URL) or "").strip()
+            if u_url and not u_url.startswith(("http://", "https://")):
+                errors[CONF_UNIFI_URL] = "invalid_url"
+            # no strict requirement here; controller will log if creds missing
+
         if errors:
             return self.async_show_form(step_id="user", data_schema=schema, errors=errors)
 
-        # stash and route to provider-specific step
+        # Stash common + UniFi into state
         self._common = {
             "ip_range": ipr,
             "nmap_args": nmap_args,
             "scan_interval": _minutes_to_secs(mins, DEFAULT_SCAN_INTERVAL),
+
             "mac_directory": _build_dir(jtxt),
             "mac_directory_json_url": (user_input.get("mac_directory_json_url") or "").strip(),
+
             CONF_ARP_PROVIDER: user_input.get(CONF_ARP_PROVIDER, DEFAULT_ARP_PROVIDER),
             CONF_ARP_VERIFY_TLS: bool(user_input.get(CONF_ARP_VERIFY_TLS, False)),
+
+            # UniFi enrichment block
+            CONF_UNIFI_ENABLED: unifi_enabled,
+            CONF_UNIFI_URL:  (user_input.get(CONF_UNIFI_URL)  or "").strip(),
+            CONF_UNIFI_USER: (user_input.get(CONF_UNIFI_USER) or "").strip(),
+            CONF_UNIFI_PASS: (user_input.get(CONF_UNIFI_PASS) or "").strip(),
+            CONF_UNIFI_SITE: (user_input.get(CONF_UNIFI_SITE) or DEFAULT_UNIFI_SITE).strip(),
         }
 
         provider = self._common[CONF_ARP_PROVIDER]
@@ -143,35 +230,39 @@ class NetworkScannerConfigFlow(ConfigFlow, domain=DOMAIN):
             return await self.async_step_opnsense()
         if provider == "adguard":
             return await self.async_step_adguard()
-        if provider == "unifi":
-            return await self.async_step_unifi()
-        # none: finish now
+
+        # none → finish now
         return self.async_create_entry(title="Network Scanner Extended", data=self._common)
 
     async def async_step_opnsense(self, user_input=None):
+        """Step 2a: OPNsense parameters."""
         schema = vol.Schema({
             vol.Required("opnsense_url",
                 description={"suggested_value": DEFAULT_OPNSENSE_URL}): str,
-            vol.Optional("opnsense_key",    description={"suggested_value": ""}): str,
-            vol.Optional("opnsense_secret", description={"suggested_value": ""}): str,
+            vol.Optional("opnsense_key",
+                description={"suggested_value": ""}): str,
+            vol.Optional("opnsense_secret",
+                description={"suggested_value": ""}): str,
             vol.Optional("opnsense_interface",
                 description={"suggested_value": DEFAULT_OPNSENSE_IFACE}): str,
         })
         if user_input is None:
             return self.async_show_form(step_id="opnsense", data_schema=schema, errors={})
 
-        errors: Dict[str,str] = {}
+        errors: Dict[str, str] = {}
         url = (user_input.get("opnsense_url") or "").strip()
-        if url and not url.startswith(("http://","https://")):
+        if url and not url.startswith(("http://", "https://")):
             errors["opnsense_url"] = "invalid_url"
+
         key = (user_input.get("opnsense_key") or "").strip()
         sec = (user_input.get("opnsense_secret") or "").strip()
         if (key and not sec) or (sec and not key):
             errors["opnsense_key"] = "incomplete_credentials"
+
         if errors:
             return self.async_show_form(step_id="opnsense", data_schema=schema, errors=errors)
 
-        data = dict(self._common)
+        data = dict(self._common or {})
         data.update({
             "opnsense_url": url,
             "opnsense_key": key,
@@ -181,65 +272,46 @@ class NetworkScannerConfigFlow(ConfigFlow, domain=DOMAIN):
         return self.async_create_entry(title="Network Scanner Extended", data=data)
 
     async def async_step_adguard(self, user_input=None):
+        """Step 2b: AdGuard parameters."""
         schema = vol.Schema({
             vol.Required(CONF_ADG_URL,
                 description={"suggested_value": DEFAULT_ADGUARD_URL}): str,
-            vol.Required(CONF_ADG_USER, description={"suggested_value": ""}): str,
-            vol.Required(CONF_ADG_PASS, description={"suggested_value": ""}): str,
+            vol.Required(CONF_ADG_USER,
+                description={"suggested_value": ""}): str,
+            vol.Required(CONF_ADG_PASS,
+                description={"suggested_value": ""}): str,
         })
         if user_input is None:
             return self.async_show_form(step_id="adguard", data_schema=schema, errors={})
 
-        errors: Dict[str,str] = {}
+        errors: Dict[str, str] = {}
         url = (user_input.get(CONF_ADG_URL) or "").strip()
-        if url and not url.startswith(("http://","https://")):
+        if url and not url.startswith(("http://", "https://")):
             errors[CONF_ADG_URL] = "invalid_url"
-        if not (user_input.get(CONF_ADG_USER) and user_input.get(CONF_ADG_PASS)):
+
+        user = (user_input.get(CONF_ADG_USER) or "").strip()
+        pwd  = (user_input.get(CONF_ADG_PASS) or "").strip()
+        if not (user and pwd):
             errors[CONF_ADG_USER] = "incomplete_credentials"
+
         if errors:
             return self.async_show_form(step_id="adguard", data_schema=schema, errors=errors)
 
-        data = dict(self._common)
+        data = dict(self._common or {})
         data.update({
-            CONF_ADG_URL: url,
-            CONF_ADG_USER: (user_input.get(CONF_ADG_USER) or "").strip(),
-            CONF_ADG_PASS: (user_input.get(CONF_ADG_PASS) or "").strip(),
+            CONF_ADG_URL:  url,
+            CONF_ADG_USER: user,
+            CONF_ADG_PASS: pwd,
         })
         return self.async_create_entry(title="Network Scanner Extended", data=data)
 
-    async def async_step_unifi(self, user_input=None):
-        schema = vol.Schema({
-            vol.Required(CONF_UNIFI_URL,
-                description={"suggested_value": DEFAULT_UNIFI_URL}): str,
-            vol.Required(CONF_UNIFI_USER, description={"suggested_value": ""}): str,
-            vol.Required(CONF_UNIFI_PASS, description={"suggested_value": ""}): str,
-            vol.Optional(CONF_UNIFI_SITE,
-                description={"suggested_value": DEFAULT_UNIFI_SITE}): str,
-        })
-        if user_input is None:
-            return self.async_show_form(step_id="unifi", data_schema=schema, errors={})
-
-        errors: Dict[str,str] = {}
-        url = (user_input.get(CONF_UNIFI_URL) or "").strip()
-        if url and not url.startswith(("http://","https://")):
-            errors[CONF_UNIFI_URL] = "invalid_url"
-        if not (user_input.get(CONF_UNIFI_USER) and user_input.get(CONF_UNIFI_PASS)):
-            errors[CONF_UNIFI_USER] = "incomplete_credentials"
-        if errors:
-            return self.async_show_form(step_id="unifi", data_schema=schema, errors=errors)
-
-        data = dict(self._common)
-        data.update({
-            CONF_UNIFI_URL: url,
-            CONF_UNIFI_USER: (user_input.get(CONF_UNIFI_USER) or "").strip(),
-            CONF_UNIFI_PASS: (user_input.get(CONF_UNIFI_PASS) or "").strip(),
-            CONF_UNIFI_SITE: (user_input.get(CONF_UNIFI_SITE) or DEFAULT_UNIFI_SITE).strip(),
-        })
-        return self.async_create_entry(title="Network Scanner Extended", data=data)
-
-# ---------------- Options Flow (single step; keeps provider; respects placeholders) ----------------
+# ======================================================================
+#                             OPTIONS FLOW
+# ======================================================================
 
 class NetworkScannerOptionsFlow(OptionsFlow):
+    """Single-step options; shows UniFi regardless of ARP provider; preserves masked secrets."""
+
     def __init__(self, entry: ConfigEntry) -> None:
         self.entry = entry
 
@@ -258,17 +330,31 @@ class NetworkScannerOptionsFlow(OptionsFlow):
                 description={"suggested_value": opts.get("nmap_args", data.get("nmap_args", DEFAULT_NMAP_ARGS))}): str,
             vol.Optional("scan_interval_minutes",
                 description={"suggested_value": saved_mins}): MinutesNumberSelector(),
+
             vol.Required(CONF_ARP_PROVIDER,
                 description={"suggested_value": prov}): vol.In(ARP_PROVIDERS),
             vol.Optional(CONF_ARP_VERIFY_TLS,
                 description={"suggested_value": opts.get(CONF_ARP_VERIFY_TLS, data.get(CONF_ARP_VERIFY_TLS, False))}): bool,
+
             vol.Optional("mac_directory_json_text",
-                description={"suggested_value": opts.get("mac_directory_json_text","")}): TextSelector(),
+                description={"suggested_value": opts.get("mac_directory_json_text", "")}): TextSelector(),
             vol.Optional("mac_directory_json_url",
-                description={"suggested_value": opts.get("mac_directory_json_url", data.get("mac_directory_json_url",""))}): str,
+                description={"suggested_value": opts.get("mac_directory_json_url", data.get("mac_directory_json_url", ""))}): str,
+
+            # UniFi enrichment (independent of ARP provider)
+            vol.Optional(CONF_UNIFI_ENABLED,
+                description={"suggested_value": opts.get(CONF_UNIFI_ENABLED, data.get(CONF_UNIFI_ENABLED, False))}): bool,
+            vol.Optional(CONF_UNIFI_URL,
+                description={"suggested_value": opts.get(CONF_UNIFI_URL, data.get(CONF_UNIFI_URL, DEFAULT_UNIFI_URL))}): str,
+            vol.Optional(CONF_UNIFI_USER,
+                description={"suggested_value": "********" if (opts.get(CONF_UNIFI_USER) or data.get(CONF_UNIFI_USER)) else ""}): str,
+            vol.Optional(CONF_UNIFI_PASS,
+                description={"suggested_value": "********" if (opts.get(CONF_UNIFI_PASS) or data.get(CONF_UNIFI_PASS)) else ""}): str,
+            vol.Optional(CONF_UNIFI_SITE,
+                description={"suggested_value": opts.get(CONF_UNIFI_SITE, data.get(CONF_UNIFI_SITE, DEFAULT_UNIFI_SITE))}): str,
         }
 
-        # Provider-specific visible fields (cannot conditionally hide; we just keep them grouped)
+        # Provider-specific block (just the fields for the chosen provider)
         if prov == "opnsense":
             schema_dict.update({
                 vol.Optional("opnsense_url",
@@ -289,32 +375,25 @@ class NetworkScannerOptionsFlow(OptionsFlow):
                 vol.Optional(CONF_ADG_PASS,
                     description={"suggested_value": "********" if (opts.get(CONF_ADG_PASS) or data.get(CONF_ADG_PASS)) else ""}): str,
             })
-        elif prov == "unifi":
-            schema_dict.update({
-                vol.Optional(CONF_UNIFI_URL,
-                    description={"suggested_value": opts.get(CONF_UNIFI_URL, data.get(CONF_UNIFI_URL, DEFAULT_UNIFI_URL))}): str,
-                vol.Optional(CONF_UNIFI_USER,
-                    description={"suggested_value": "********" if (opts.get(CONF_UNIFI_USER) or data.get(CONF_UNIFI_USER)) else ""}): str,
-                vol.Optional(CONF_UNIFI_PASS,
-                    description={"suggested_value": "********" if (opts.get(CONF_UNIFI_PASS) or data.get(CONF_UNIFI_PASS)) else ""}): str,
-                vol.Optional(CONF_UNIFI_SITE,
-                    description={"suggested_value": opts.get(CONF_UNIFI_SITE, data.get(CONF_UNIFI_SITE, DEFAULT_UNIFI_SITE))}): str,
-            })
+        # prov == "none": no extra fields
 
         schema = vol.Schema(schema_dict)
 
         if user_input is None:
             return self.async_show_form(step_id="init", data_schema=schema, errors={})
 
-        # validate
-        errors: Dict[str,str] = {}
+        # ---------- validation ----------
+        errors: Dict[str, str] = {}
+
         ipr = (user_input.get("ip_range") or "").strip()
         cidrs = _split_cidrs(ipr)
-        if any(_cidr_bad(c) for c in cidrs):
+        if not cidrs or any(_cidr_bad(c) for c in cidrs):
             errors["ip_range"] = "invalid_ip_range"
+
         mins = user_input.get("scan_interval_minutes", saved_mins)
-        if mins < 0 or mins > 1440:
+        if not isinstance(mins, int) or mins < 0 or mins > 1440:
             errors["scan_interval_minutes"] = "invalid_scan_interval"
+
         nmap_args = (user_input.get("nmap_args") or opts.get("nmap_args") or DEFAULT_NMAP_ARGS).strip()
         if _nmap_args_invalid(nmap_args):
             errors["nmap_args"] = "invalid_nmap_args"
@@ -323,16 +402,19 @@ class NetworkScannerOptionsFlow(OptionsFlow):
 
         def _url_ok(field: str):
             v = (user_input.get(field) or "").strip()
-            if v and not v.startswith(("http://","https://")):
+            if v and not v.startswith(("http://", "https://")):
                 errors[field] = "invalid_url"
             return v
 
+        # Provider-specific checks
         if prov == "opnsense":
             _url_ok("opnsense_url")
             key_in = (user_input.get("opnsense_key") or "").strip()
             sec_in = (user_input.get("opnsense_secret") or "").strip()
-            if key_in == "********": key_in = opts.get("opnsense_key") or data.get("opnsense_key", "")
-            if sec_in == "********": sec_in = opts.get("opnsense_secret") or data.get("opnsense_secret", "")
+            if key_in == "********":
+                key_in = opts.get("opnsense_key") or data.get("opnsense_key", "")
+            if sec_in == "********":
+                sec_in = opts.get("opnsense_secret") or data.get("opnsense_secret", "")
             if (key_in and not sec_in) or (sec_in and not key_in):
                 errors["opnsense_key"] = "incomplete_credentials"
 
@@ -340,18 +422,25 @@ class NetworkScannerOptionsFlow(OptionsFlow):
             _url_ok(CONF_ADG_URL)
             k = (user_input.get(CONF_ADG_USER) or "").strip()
             s = (user_input.get(CONF_ADG_PASS) or "").strip()
-            if k == "********": k = opts.get(CONF_ADG_USER) or data.get(CONF_ADG_USER, "")
-            if s == "********": s = opts.get(CONF_ADG_PASS) or data.get(CONF_ADG_PASS, "")
+            if k == "********":
+                k = opts.get(CONF_ADG_USER) or data.get(CONF_ADG_USER, "")
+            if s == "********":
+                s = opts.get(CONF_ADG_PASS) or data.get(CONF_ADG_PASS, "")
             if (k and not s) or (s and not k):
                 errors[CONF_ADG_USER] = "incomplete_credentials"
 
-        if prov == "unifi":
+        # UniFi (independent; only validate if enabled)
+        unifi_enabled = bool(user_input.get(CONF_UNIFI_ENABLED,
+                             opts.get(CONF_UNIFI_ENABLED, data.get(CONF_UNIFI_ENABLED, False))))
+        if unifi_enabled:
             _url_ok(CONF_UNIFI_URL)
-            k = (user_input.get(CONF_UNIFI_USER) or "").strip()
-            s = (user_input.get(CONF_UNIFI_PASS) or "").strip()
-            if k == "********": k = opts.get(CONF_UNIFI_USER) or data.get(CONF_UNIFI_USER, "")
-            if s == "********": s = opts.get(CONF_UNIFI_PASS) or data.get(CONF_UNIFI_PASS, "")
-            if (k and not s) or (s and not k):
+            u = (user_input.get(CONF_UNIFI_USER) or "").strip()
+            p = (user_input.get(CONF_UNIFI_PASS) or "").strip()
+            if u == "********":
+                u = opts.get(CONF_UNIFI_USER) or data.get(CONF_UNIFI_USER, "")
+            if p == "********":
+                p = opts.get(CONF_UNIFI_PASS) or data.get(CONF_UNIFI_PASS, "")
+            if (u and not p) or (p and not u):
                 errors[CONF_UNIFI_USER] = "incomplete_credentials"
 
         jtxt = (user_input.get("mac_directory_json_text") or "").strip()
@@ -361,36 +450,51 @@ class NetworkScannerOptionsFlow(OptionsFlow):
         if errors:
             return self.async_show_form(step_id="init", data_schema=schema, errors=errors)
 
-        # build saved options
+        # ---------- save ----------
         out = {
             "ip_range": ipr,
             "nmap_args": nmap_args,
             "scan_interval": _minutes_to_secs(mins, DEFAULT_SCAN_INTERVAL),
             CONF_ARP_PROVIDER: prov,
-            CONF_ARP_VERIFY_TLS: bool(user_input.get(CONF_ARP_VERIFY_TLS, opts.get(CONF_ARP_VERIFY_TLS, data.get(CONF_ARP_VERIFY_TLS, False)))),
+            CONF_ARP_VERIFY_TLS: bool(user_input.get(
+                CONF_ARP_VERIFY_TLS,
+                opts.get(CONF_ARP_VERIFY_TLS, data.get(CONF_ARP_VERIFY_TLS, False))
+            )),
             "mac_directory_json_text": jtxt,
             "mac_directory_json_url": (user_input.get("mac_directory_json_url") or "").strip(),
+
+            # UniFi persisted regardless of provider (independent enrichment)
+            CONF_UNIFI_ENABLED: unifi_enabled,
+            CONF_UNIFI_URL:  (user_input.get(CONF_UNIFI_URL)  or opts.get(CONF_UNIFI_URL)  or data.get(CONF_UNIFI_URL, "")).strip(),
+            CONF_UNIFI_USER: ((user_input.get(CONF_UNIFI_USER) or "").strip().replace("********", "")
+                              or opts.get(CONF_UNIFI_USER) or data.get(CONF_UNIFI_USER, "")),
+            CONF_UNIFI_PASS: ((user_input.get(CONF_UNIFI_PASS) or "").strip().replace("********", "")
+                              or opts.get(CONF_UNIFI_PASS) or data.get(CONF_UNIFI_PASS, "")),
+            CONF_UNIFI_SITE: (user_input.get(CONF_UNIFI_SITE) or opts.get(CONF_UNIFI_SITE)
+                              or data.get(CONF_UNIFI_SITE, DEFAULT_UNIFI_SITE)).strip(),
         }
 
-        # carry provider-specific fields (preserving old secrets when "********")
+        # Carry provider-specific fields (preserving masked secrets)
         if prov == "opnsense":
-            out["opnsense_url"] = (user_input.get("opnsense_url") or opts.get("opnsense_url") or data.get("opnsense_url", "")).strip()
-            out["opnsense_key"] = (user_input.get("opnsense_key")  or opts.get("opnsense_key")  or data.get("opnsense_key", "")).replace("********","").strip() or opts.get("opnsense_key") or data.get("opnsense_key","")
-            out["opnsense_secret"] = (user_input.get("opnsense_secret") or opts.get("opnsense_secret") or data.get("opnsense_secret","")).replace("********","").strip() or opts.get("opnsense_secret") or data.get("opnsense_secret","")
-            out["opnsense_interface"] = (user_input.get("opnsense_interface") or opts.get("opnsense_interface") or data.get("opnsense_interface","")).strip()
+            out["opnsense_url"] = (user_input.get("opnsense_url") or opts.get("opnsense_url")
+                                   or data.get("opnsense_url", "")).strip()
+            out["opnsense_key"] = ((user_input.get("opnsense_key") or "").strip().replace("********", "")
+                                   or opts.get("opnsense_key") or data.get("opnsense_key", ""))
+            out["opnsense_secret"] = ((user_input.get("opnsense_secret") or "").strip().replace("********", "")
+                                      or opts.get("opnsense_secret") or data.get("opnsense_secret", ""))
+            out["opnsense_interface"] = (user_input.get("opnsense_interface") or opts.get("opnsense_interface")
+                                         or data.get("opnsense_interface", "")).strip()
 
         if prov == "adguard":
-            out[CONF_ADG_URL]  = (user_input.get(CONF_ADG_URL)  or opts.get(CONF_ADG_URL)  or data.get(CONF_ADG_URL,"")).strip()
-            out[CONF_ADG_USER] = (user_input.get(CONF_ADG_USER) or opts.get(CONF_ADG_USER) or data.get(CONF_ADG_USER,"")).replace("********","").strip() or opts.get(CONF_ADG_USER) or data.get(CONF_ADG_USER,"")
-            out[CONF_ADG_PASS] = (user_input.get(CONF_ADG_PASS) or opts.get(CONF_ADG_PASS) or data.get(CONF_ADG_PASS,"")).replace("********","").strip() or opts.get(CONF_ADG_PASS) or data.get(CONF_ADG_PASS,"")
-
-        if prov == "unifi":
-            out[CONF_UNIFI_URL]  = (user_input.get(CONF_UNIFI_URL)  or opts.get(CONF_UNIFI_URL)  or data.get(CONF_UNIFI_URL,"")).strip()
-            out[CONF_UNIFI_USER] = (user_input.get(CONF_UNIFI_USER) or opts.get(CONF_UNIFI_USER) or data.get(CONF_UNIFI_USER,"")).replace("********","").strip() or opts.get(CONF_UNIFI_USER) or data.get(CONF_UNIFI_USER,"")
-            out[CONF_UNIFI_PASS] = (user_input.get(CONF_UNIFI_PASS) or opts.get(CONF_UNIFI_PASS) or data.get(CONF_UNIFI_PASS,"")).replace("********","").strip() or opts.get(CONF_UNIFI_PASS) or data.get(CONF_UNIFI_PASS,"")
-            out[CONF_UNIFI_SITE] = (user_input.get(CONF_UNIFI_SITE) or opts.get(CONF_UNIFI_SITE) or data.get(CONF_UNIFI_SITE, DEFAULT_UNIFI_SITE)).strip()
+            out[CONF_ADG_URL]  = (user_input.get(CONF_ADG_URL)  or opts.get(CONF_ADG_URL)
+                                  or data.get(CONF_ADG_URL, "")).strip()
+            out[CONF_ADG_USER] = ((user_input.get(CONF_ADG_USER) or "").strip().replace("********", "")
+                                  or opts.get(CONF_ADG_USER) or data.get(CONF_ADG_USER, ""))
+            out[CONF_ADG_PASS] = ((user_input.get(CONF_ADG_PASS) or "").strip().replace("********", "")
+                                  or opts.get(CONF_ADG_PASS) or data.get(CONF_ADG_PASS, ""))
 
         return self.async_create_entry(title="", data=out)
 
+# Hook for HA
 async def async_get_options_flow(config_entry: ConfigEntry):
     return NetworkScannerOptionsFlow(config_entry)
