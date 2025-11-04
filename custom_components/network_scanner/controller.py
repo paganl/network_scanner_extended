@@ -1,6 +1,6 @@
-# custom_components/network_scanner/controller.py
 from __future__ import annotations
 from typing import Any, Dict, List, Optional, Tuple
+import asyncio
 import json
 import logging
 import re
@@ -22,7 +22,6 @@ from .const import (
     ARP_PROVIDER_NONE,
     ARP_PROVIDER_OPNSENSE,
     ARP_PROVIDER_ADGUARD,
-    ARP_PROVIDER_UNIFI,
     CONF_ARP_VERIFY_TLS,
     # status/phase + signal
     STATUS_IDLE, STATUS_SCANNING, STATUS_ENRICHING, STATUS_OK, STATUS_ERROR,
@@ -30,8 +29,11 @@ from .const import (
     SIGNAL_NSX_UPDATED,
     # AdGuard
     CONF_ADG_URL, CONF_ADG_USER, CONF_ADG_PASS,
+    # UniFi
+    CONF_UNIFI_ENABLED, CONF_UNIFI_URL, CONF_UNIFI_USER, CONF_UNIFI_PASS, CONF_UNIFI_SITE,
 )
-from .opnsense import OPNsenseARPClient
+
+from .opnsense import OPNsenseARPClient  # (kept for historical reference; using local HTTP below)
 from .adguard import AdGuardDHCPClient
 from .unifi import UniFiClient
 
@@ -40,7 +42,6 @@ _LOGGER = logging.getLogger(__name__)
 # ---------------- helpers ----------------
 
 def _emit_update(hass) -> None:
-    # Fire dispatcher safely from any thread
     hass.loop.call_soon_threadsafe(async_dispatcher_send, hass, SIGNAL_NSX_UPDATED)
 
 def _now_iso() -> str:
@@ -102,7 +103,7 @@ def _ip_in_any(ip_str: str, nets: List[Tuple[str, object]]) -> bool:
             continue
     return False
 
-# --------- normalisation to unified schema (per provider) ---------
+# --------- unified device model ---------
 
 def _make_base(ip: str = "", mac: str = "") -> dict:
     return {
@@ -119,9 +120,7 @@ def _make_base(ip: str = "", mac: str = "") -> dict:
     }
 
 def norm_from_arp(ip: str, mac: str) -> dict:
-    d = _make_base(ip, mac)
-    d["source"] = ["arp"]
-    return d
+    d = _make_base(ip, mac); d["source"] = ["arp"]; return d
 
 def norm_from_adguard(lease: dict) -> dict:
     ip = str(lease.get("ip", "") or lease.get("address", ""))
@@ -130,41 +129,30 @@ def norm_from_adguard(lease: dict) -> dict:
     d["dhcp"]["server"] = "adguard"
     d["dhcp"]["lease_ip"] = ip
     d["source"] = ["adguard"]
-    # optionally carry hostname
     host = lease.get("hostname") or lease.get("name") or ""
-    d["hostname"] = host or d["hostname"]
+    if host: d["hostname"] = host
     return d
 
 def norm_from_unifi_client(c: dict, ap_name_by_mac: dict[str, str]) -> dict:
     ip = str(c.get("ip", "") or "")
     mac = _clean_mac(c.get("mac", ""))
     d = _make_base(ip, mac)
-    d["hostname"] = c.get("hostname", "") or d["hostname"]
-    d["vendor"] = c.get("oui", "") or d["vendor"]
-    d["wired"] = bool(c.get("is_wired")) if c.get("is_wired") is not None else None
-    d["ssid"] = c.get("essid", "") or d["ssid"]
-    if isinstance(c.get("vlan"), int):
-        d["vlan"] = c.get("vlan")
-    # AP + switch context if present
-    ap_mac = _clean_mac(c.get("ap_mac", ""))
-    if ap_mac:
-        d["ap"]["mac"] = ap_mac
-        d["ap"]["name"] = ap_name_by_mac.get(ap_mac, "")
-    sw_mac = _clean_mac(c.get("sw_mac", ""))
-    if sw_mac:
-        d["switch"]["mac"] = sw_mac
-        d["switch"]["port"] = c.get("sw_port")
-    # signal/bytes
+    if c.get("hostname"): d["hostname"] = c["hostname"]
+    if c.get("oui"): d["vendor"] = c["oui"]
+    if c.get("is_wired") is not None: d["wired"] = bool(c["is_wired"])
+    if c.get("essid"): d["ssid"] = c["essid"]
+    if isinstance(c.get("vlan"), int): d["vlan"] = c["vlan"]
+    ap_mac = _clean_mac(c.get("ap_mac", "")); 
+    if ap_mac: d["ap"]["mac"] = ap_mac; d["ap"]["name"] = ap_name_by_mac.get(ap_mac, "")
+    sw_mac = _clean_mac(c.get("sw_mac", "")); 
+    if sw_mac: d["switch"]["mac"] = sw_mac; d["switch"]["port"] = c.get("sw_port")
     if isinstance(c.get("rssi"), int): d["signal"]["rssi"] = c["rssi"]
     if isinstance(c.get("snr"), int):  d["signal"]["snr"] = c["snr"]
     d["bytes"]["tx"] = int(c.get("tx_bytes", 0) or 0)
     d["bytes"]["rx"] = int(c.get("rx_bytes", 0) or 0)
-    # timestamps
     def _iso(v):
-        try:
-            return datetime.fromtimestamp(int(v), tz=timezone.utc).isoformat()
-        except Exception:
-            return ""
+        try: return datetime.fromtimestamp(int(v), tz=timezone.utc).isoformat()
+        except Exception: return ""
     if c.get("first_seen"): d["first_seen"] = _iso(c["first_seen"])
     if c.get("last_seen"):  d["last_seen"]  = _iso(c["last_seen"])
     d["source"] = ["unifi"]
@@ -172,17 +160,13 @@ def norm_from_unifi_client(c: dict, ap_name_by_mac: dict[str, str]) -> dict:
 
 def norm_from_nmap(ip: str, mac: str, vendor: str, hostname: str) -> dict:
     d = _make_base(ip, mac)
-    d["vendor"] = vendor or d["vendor"]
-    d["hostname"] = hostname or d["hostname"]
+    if vendor: d["vendor"] = vendor
+    if hostname: d["hostname"] = hostname
     d["source"] = ["nmap"]
     return d
 
-# --------- merge helpers (MAC-first) ---------
-
 def _merge_device(dst: dict, src: dict) -> dict:
-    """Adopt non-empty values, coalesce arrays, keep union of sources."""
     def take(path: list[str], prefer_existing: bool = False):
-        # Navigate nested dicts and set if src has a useful value
         d = dst; s = src
         for p in path[:-1]:
             d = d.setdefault(p, {})
@@ -195,20 +179,13 @@ def _merge_device(dst: dict, src: dict) -> dict:
             return
         d[key] = val
 
-    # identity & labels
-    take(["ip"], prefer_existing=True)
-    take(["mac"])
-    for p in (["name"], ["hostname"], ["vendor"], ["type"]): take(p)
-    # connectivity/topology
+    for p in (["ip"], ["mac"], ["name"], ["hostname"], ["vendor"], ["type"]): take(p)
     for p in (["wired"], ["ssid"], ["vlan"], ["network"]): take(p)
-    for p in (["ap","mac"], ["ap","name"], ["switch","mac"], ["switch","name"],
-              ["switch","port"], ["switch","port_name"], ["switch","poe"]): take(p)
+    for p in (["ap","mac"], ["ap","name"], ["switch","mac"], ["switch","name"], ["switch","port"], ["switch","port_name"], ["switch","poe"]): take(p)
     for p in (["signal","rssi"], ["signal","snr"]): take(p)
     for p in (["bytes","tx"], ["bytes","rx"]): take(p)
     for p in (["dhcp","server"], ["dhcp","lease_ip"], ["dhcp","reservation_ip"]): take(p)
     for p in (["first_seen"], ["last_seen"]): take(p)
-
-    # sources union
     dst["source"] = sorted(set((dst.get("source") or []) + (src.get("source") or [])))
     return dst
 
@@ -219,7 +196,6 @@ class ScanController:
         self.hass = hass
         self._entry = entry
 
-        # live state
         self._devices: List[Dict[str, Any]] = []
         self._device_count: int = 0
         self._status: str = STATUS_IDLE
@@ -229,14 +205,12 @@ class ScanController:
         self._is_scanning: bool = False
         self._scan_gen: int = 0
 
-        # config-derived
         self._cidr_strings: List[str] = []
         self._cidr_nets: List[Tuple[str, object]] = []
         self._nmap_args: str = DEFAULT_NMAP_ARGS
         self._scan_interval_minutes: int = DEFAULT_SCAN_INTERVAL_MINUTES
         self._arp_provider: str = ARP_PROVIDER_NONE
 
-        # providers config
         # OPNsense
         self._opn_url: str = ""
         self._opn_key: str = ""
@@ -249,18 +223,17 @@ class ScanController:
         self._adg_user: str = ""
         self._adg_pass: str = ""
 
-        # UniFi
+        # UniFi (independent enrichment)
+        self._unifi_enabled: bool = False
         self._unifi_url: str = ""
         self._unifi_user: str = ""
         self._unifi_pass: str = ""
         self._unifi_site: str = "default"
 
-        # TLS verify for HTTP providers
         self._verify_tls: bool = False
 
         self.apply_entry(entry)
 
-    # properties consumed by entities
     @property
     def devices(self) -> List[Dict[str, Any]]: return self._devices
     @property
@@ -280,7 +253,6 @@ class ScanController:
     @property
     def phase(self) -> str: return self._phase
 
-    # config
     def apply_entry(self, entry: ConfigEntry) -> None:
         self._entry = entry
         data = entry.data or {}
@@ -311,16 +283,14 @@ class ScanController:
         self._adg_pass = _norm(opts.get(CONF_ADG_PASS) or data.get(CONF_ADG_PASS))
 
         # UniFi
-        from .const import CONF_UNIFI_URL, CONF_UNIFI_USER, CONF_UNIFI_PASS, CONF_UNIFI_SITE
+        self._unifi_enabled = bool(opts.get(CONF_UNIFI_ENABLED, data.get(CONF_UNIFI_ENABLED, False)))
         self._unifi_url  = _norm(opts.get(CONF_UNIFI_URL)  or data.get(CONF_UNIFI_URL))
         self._unifi_user = _norm(opts.get(CONF_UNIFI_USER) or data.get(CONF_UNIFI_USER))
         self._unifi_pass = _norm(opts.get(CONF_UNIFI_PASS) or data.get(CONF_UNIFI_PASS))
         self._unifi_site = _norm(opts.get(CONF_UNIFI_SITE) or data.get(CONF_UNIFI_SITE) or "default")
 
-        # TLS verify
         self._verify_tls = bool(opts.get(CONF_ARP_VERIFY_TLS, data.get(CONF_ARP_VERIFY_TLS, False)))
 
-    # scheduling
     async def maybe_auto_scan(self) -> None:
         if self._is_scanning or self._scan_interval_minutes <= 0:
             return
@@ -331,9 +301,7 @@ class ScanController:
             except Exception:
                 last = 0.0
         now = datetime.now(timezone.utc).timestamp()
-        interval_secs = max(0, int(self._scan_interval_minutes) * 60)
-        
-        if now - last < interval_secs:
+        if now - last < self._scan_interval_minutes * 60:
             return
         await self.scan_now()
 
@@ -348,47 +316,48 @@ class ScanController:
         my_gen = self._scan_gen
         _emit_update(self.hass)
 
+        start_ts = datetime.now(timezone.utc)
+        _LOGGER.debug(
+            "Scan start gen=%d provider=%s cidrs=%s nmap_args=%r unifi_enabled=%s",
+            my_gen, self._arp_provider, self._cidr_strings, self._nmap_args, self._unifi_enabled
+        )
+
         try:
-            # -------- Phase 1: Providers (ARP/DHCP/UniFi) --------
             by_mac: Dict[str, dict] = {}
             by_ip_fallback: Dict[str, dict] = {}
 
-            # OPNsense (ARP)
+            # ---------- ARP/DHCP ----------
             if self._arp_provider == ARP_PROVIDER_OPNSENSE and self._opn_url and self._opn_key and self._opn_sec:
                 try:
                     pairs = await self._fetch_arp_table_opnsense()
                     for ip, mac in pairs.items():
-                        d = norm_from_arp(ip, mac)
                         if self._cidr_nets and not _ip_in_any(ip, self._cidr_nets):
                             continue
+                        d = norm_from_arp(ip, mac)
                         key = d["mac"] or ip
-                        if d["mac"]:
-                            by_mac[key] = _merge_device(by_mac.get(key, _make_base()), d)
-                        else:
-                            by_ip_fallback[key] = _merge_device(by_ip_fallback.get(key, _make_base()), d)
+                        target = by_mac if d["mac"] else by_ip_fallback
+                        target[key] = _merge_device(target.get(key, _make_base()), d)
                 except Exception as exc:
                     _LOGGER.warning("OPNsense ARP fetch failed: %s", exc)
 
-            # AdGuard (DHCP)
             if self._arp_provider == ARP_PROVIDER_ADGUARD and self._adg_url and self._adg_user and self._adg_pass:
                 try:
                     ag = AdGuardDHCPClient(self._adg_url, self._adg_user, self._adg_pass, verify_tls=self._verify_tls)
                     mapping = await ag.fetch_map(self.hass)  # {ip: mac}
-                    # we can also try fetch_status to get lease list with names; keep map path for now
                     for ip, mac in mapping.items():
-                        d = norm_from_adguard({"ip": ip, "mac": mac})
                         if self._cidr_nets and not _ip_in_any(ip, self._cidr_nets):
                             continue
+                        d = norm_from_adguard({"ip": ip, "mac": mac})
                         key = d["mac"] or ip
-                        if d["mac"]:
-                            by_mac[key] = _merge_device(by_mac.get(key, _make_base()), d)
-                        else:
-                            by_ip_fallback[key] = _merge_device(by_ip_fallback.get(key, _make_base()), d)
+                        target = by_mac if d["mac"] else by_ip_fallback
+                        target[key] = _merge_device(target.get(key, _make_base()), d)
                 except Exception as exc:
                     _LOGGER.warning("AdGuard DHCP fetch failed: %s", exc)
 
-            # UniFi (rich client inventory)
-            if self._arp_provider == ARP_PROVIDER_UNIFI and self._unifi_url and self._unifi_user and self._unifi_pass:
+            _LOGGER.debug("ARP/DHCP unique MAC=%d IP-only=%d", len(by_mac), len(by_ip_fallback))
+
+            # ---------- UniFi enrichment (independent) ----------
+            if self._unifi_enabled and self._unifi_url and self._unifi_user and self._unifi_pass:
                 try:
                     uc = UniFiClient(self._unifi_url, self._unifi_user, self._unifi_pass,
                                      site=self._unifi_site, verify_tls=self._verify_tls)
@@ -400,24 +369,21 @@ class ScanController:
                             mac = _clean_mac(dev.get("mac"))
                             if mac:
                                 ap_name[mac] = dev.get("name", dev.get("model", "")) or ""
+                    _LOGGER.debug("UniFi: clients=%d devices=%d", len(clients or []), len(devices or []))
                     for c in clients or []:
                         d = norm_from_unifi_client(c, ap_name)
                         ip = d.get("ip", "")
                         if ip and self._cidr_nets and not _ip_in_any(ip, self._cidr_nets):
                             continue
                         key = d["mac"] or ip
-                        if d["mac"]:
-                            by_mac[key] = _merge_device(by_mac.get(key, _make_base()), d)
-                        else:
-                            by_ip_fallback[key] = _merge_device(by_ip_fallback.get(key, _make_base()), d)
+                        target = by_mac if d["mac"] else by_ip_fallback
+                        target[key] = _merge_device(target.get(key, _make_base()), d)
                 except Exception as exc:
                     _LOGGER.warning("UniFi fetch failed: %s", exc)
 
-            # Publish partial (ARP/DHCP/UniFi)
+            # Publish Phase-1
             if my_gen == self._scan_gen:
-                # prefer MAC-keyed; add IP-only records at end
                 union = list(by_mac.values()) + [v for k, v in by_ip_fallback.items() if k not in by_mac]
-                # directory overrides before publishing
                 directory = await self._build_effective_directory()
                 self._apply_directory_overrides(union, directory)
                 self._devices = sorted(union, key=lambda d: _ip_sort_key(d.get("ip", "")))
@@ -425,14 +391,9 @@ class ScanController:
                 self._status = STATUS_ENRICHING
                 self._phase = PHASE_ARP
                 _emit_update(self.hass)
-                
-            _LOGGER.debug(
-                "Phase1 complete: provider=%s devices=%d (mac-keyed=%d, ip-only=%d)",
-                self._arp_provider, len(by_mac) + len(by_ip_fallback), len(by_mac), len(by_ip_fallback)
-            )
 
-            # -------- Phase 2: nmap (optional) --------
-            if self._cidr_strings:  # only if ranges are set
+            # ---------- nmap (optional) ----------
+            if self._cidr_strings:
                 def _scan_ranges(cidrs: List[str], args: str) -> Dict[str, dict]:
                     out: Dict[str, dict] = {}
                     try:
@@ -466,13 +427,17 @@ class ScanController:
                                 _LOGGER.debug("nmap parse skip host %s: %s", host, exc)
                     return out
 
-                nmap_map: Dict[str, dict] = await self.hass.async_add_executor_job(
-                    _scan_ranges, self._cidr_strings, self._nmap_args
-                )
+                try:
+                    nmap_map: Dict[str, dict] = await asyncio.wait_for(
+                        self.hass.async_add_executor_job(_scan_ranges, self._cidr_strings, self._nmap_args),
+                        timeout=60  # seconds; tune if needed
+                    )
+                except asyncio.TimeoutError:
+                    _LOGGER.warning("nmap timed out after 60s; publishing ARP/DHCP/UniFi only")
+                    nmap_map = {}
 
-                # merge nmap into existing union
                 union_by_mac: Dict[str, dict] = {d.get("mac",""): d for d in self._devices if d.get("mac")}
-                ip_only: Dict[str, dict] = {d.get("ip",""): d for d in self._devices if not d.get("mac") and d.get("ip")}
+                ip_only: Dict[str, dict]      = {d.get("ip",""):  d for d in self._devices if not d.get("mac") and d.get("ip")}
 
                 for ip, nd in nmap_map.items():
                     mac = nd.get("mac","")
@@ -481,9 +446,8 @@ class ScanController:
                     else:
                         ip_only[ip] = _merge_device(ip_only.get(ip, _make_base()), nd)
 
-                final = list(union_by_mac.values()) + [v for k,v in ip_only.items() if k not in union_by_mac]
+                final = list(union_by_mac.values()) + [v for k, v in ip_only.items() if k not in union_by_mac]
 
-                # directory overrides before final publish
                 directory = await self._build_effective_directory()
                 self._apply_directory_overrides(final, directory)
 
@@ -494,7 +458,6 @@ class ScanController:
                     self._phase = PHASE_NMAP
                     _emit_update(self.hass)
             else:
-                # ARP/DHCP/UniFi only
                 if my_gen == self._scan_gen:
                     self._status = STATUS_OK if self._devices else STATUS_ERROR
                     self._phase = PHASE_IDLE
@@ -511,19 +474,17 @@ class ScanController:
                 self._last_scan_finished = _now_iso()
                 self._is_scanning = False
                 _emit_update(self.hass)
+                _LOGGER.debug(
+                    "Scan finish gen=%d status=%s phase=%s devices=%d elapsed=%.2fs",
+                    my_gen, self._status, self._phase, self._device_count,
+                    (datetime.now(timezone.utc) - start_ts).total_seconds()
+                )
 
     # ------------- provider impls -------------
 
     async def _fetch_arp_table_opnsense(self) -> Dict[str, str]:
-        """
-        POST {base}/api/diagnostics/interface/search_arp (and with '/')
-        form-data: current=1, rowCount=9999, searchPhrase="", [interface=<iface>]
-        Basic auth: key:secret
-        Returns { ip -> MAC } (cleaned).
-        """
         if not (self._opn_url and self._opn_key and self._opn_sec):
             return {}
-
         session = async_get_clientsession(self.hass, verify_ssl=self._verify_tls)
         auth = BasicAuth(self._opn_key, self._opn_sec)
         base = f"{self._opn_url.rstrip('/')}/api/diagnostics/interface"
@@ -553,13 +514,11 @@ class ScanController:
         def pick(rows: List[dict]) -> Dict[str, str]:
             out: Dict[str, str] = {}
             for r in rows:
-                if not isinstance(r, dict):
-                    continue
+                if not isinstance(r, dict): continue
                 rip = r.get("ip") or r.get("address") or r.get("inet")
                 rmac = r.get("mac") or r.get("lladdr") or r.get("hwaddr")
                 mac = _clean_mac(rmac)
-                if rip and mac:
-                    out[str(rip)] = mac
+                if rip and mac: out[str(rip)] = mac
             return out
         if isinstance(data, dict):
             if isinstance(data.get("rows"), list):
@@ -567,13 +526,12 @@ class ScanController:
             for v in data.values():
                 if isinstance(v, list) and v and isinstance(v[0], dict):
                     got = pick(v)
-                    if got:
-                        return got
+                    if got: return got
         if isinstance(data, list) and data and isinstance(data[0], dict):
             return pick(data)
         return {}
 
-    # directory build + overlay
+    # ------------- directory overlay -------------
 
     async def _build_effective_directory(self) -> Dict[str, Dict[str, str]]:
         out: Dict[str, Dict[str, str]] = {}
@@ -581,8 +539,7 @@ class ScanController:
         if isinstance(base, dict):
             for k, v in base.items():
                 mk = _clean_mac(k)
-                if not mk:
-                    continue
+                if not mk: continue
                 if isinstance(v, dict):
                     out[mk] = {"name": str(v.get("name", "")), "desc": str(v.get("desc", ""))}
                 else:
@@ -615,10 +572,7 @@ class ScanController:
             override = directory.get(mac)
             if not override:
                 continue
-            name = override.get("name")
-            desc = override.get("desc")
-            if name:
-                dev["name"] = name
-            if desc:
-                # Keep 'type' for real device type; store free-text into 'notes'
-                dev.setdefault("notes", desc)
+            if override.get("name"):
+                dev["name"] = override["name"]
+            if override.get("desc"):
+                dev["type"] = override["desc"]
