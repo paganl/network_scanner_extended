@@ -212,13 +212,12 @@ class UniFiClient:
 
         return False
 
-
     async def _ensure_ready(self, hass) -> bool:
         if self._api_root:
             return True
         if not await self._login(hass):
             return False
-        # CSRF (your controller clearly wants this)
+        # CSRF (controller may insist on this)
         if not await self._fetch_csrf(hass):
             _LOGGER.debug("UniFi: CSRF not obtained; controller may 401 on probes")
         if not await self._detect_api_root(hass):
