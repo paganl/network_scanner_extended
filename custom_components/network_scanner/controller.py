@@ -333,7 +333,7 @@ class ScanController:
         now = datetime.now(timezone.utc).timestamp()
         interval_secs = max(0, int(self._scan_interval_minutes) * 60)
         
-        if now - last < interval_secs
+        if now - last < interval_secs:
             return
         await self.scan_now()
 
