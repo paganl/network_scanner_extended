@@ -174,8 +174,10 @@ class UniFiClient:
 
     async def _detect_api_root(self, hass) -> bool:
         """
-        Must be called after _login() and CSRF retrieval.
+        Must be called after _login() and (ideally) CSRF retrieval.
+        We probe /self/sites first; if that 401s, try hitting a data endpoint directly.
         """
+        # 1) Normal probe
         for candidate in ("/proxy/network/api", "/api"):
             try:
                 status, txt = await self._get_any(hass, f"{candidate}/self/sites")
@@ -189,11 +191,27 @@ class UniFiClient:
                         self._api_root = candidate
                         _LOGGER.debug("UniFi: selected API root %s", candidate)
                         return True
-                elif status == 401:
-                    _LOGGER.debug("UniFi probe %s/self/sites got 401 (likely missing/invalid CSRF)", candidate)
             except ClientError as exc:
                 _LOGGER.debug("UniFi probe failed for %s: %s", candidate, exc)
+
+        # 2) Fallback: some legacy controllers won’t serve /self/sites without CSRF
+        # Try the data endpoints directly on /api
+        try_candidates = ["/api"]  # only legacy path makes sense here
+        for candidate in try_candidates:
+            try:
+                status_sta, _ = await self._get_any(hass, f"{candidate}/s/{self.site}/stat/sta")
+                status_dev, _ = await self._get_any(hass, f"{candidate}/s/{self.site}/stat/device")
+                _LOGGER.debug("UniFi direct probe %s stat/sta=%s stat/device=%s",
+                              candidate, status_sta, status_dev)
+                if status_sta == 200 or status_dev == 200:
+                    self._api_root = candidate
+                    _LOGGER.debug("UniFi: adopting API root %s via direct data probe", candidate)
+                    return True
+            except ClientError as exc:
+                _LOGGER.debug("UniFi direct data probe failed for %s: %s", candidate, exc)
+
         return False
+
 
     async def _ensure_ready(self, hass) -> bool:
         if self._api_root:
