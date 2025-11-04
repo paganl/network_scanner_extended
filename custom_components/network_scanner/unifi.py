@@ -1,6 +1,6 @@
 # custom_components/network_scanner/unifi.py
 from __future__ import annotations
-from typing import Any
+from typing import Any, Optional
 import json
 import logging
 
@@ -11,22 +11,14 @@ _LOGGER = logging.getLogger(__name__)
 
 class UniFiClient:
     """
-    Minimal UniFi client that copes with both UniFi OS (UDM/UDR/CloudKey Gen2)
-    and legacy/stand-alone Network Application.
-
-    Strategy:
-      1) Try UniFi OS login:   POST /api/auth/login
-      2) Fallback legacy:      POST /api/login
-      3) After a successful login, PROBE which API root responds:
-           - UniFi OS:   GET /proxy/network/api/self/sites
-           - Legacy:     GET /api/self/sites
-         Then lock onto that root for subsequent calls.
-
-    NOTE:
-      - Base URL should include scheme, host, and (if non-standard) port.
-        e.g. https://10.0.0.3:4334
-      - 'verify_tls' controls certificate verification (self-signed -> False).
-      - We do not persist cookies manually; we rely on HA's shared session.
+    Robust UniFi client that:
+      - Tries UniFi OS login (/api/auth/login), then legacy (/api/login).
+      - PROBES the working API root after login:
+          * /proxy/network/api/self/sites   (UniFi OS proxy)
+          * /api/self/sites                 (legacy / direct)
+      - Caches the chosen root and uses it for:
+          * GET {root}/s/{site}/stat/sta     (clients)
+          * GET {root}/s/{site}/stat/device  (devices)
     """
 
     def __init__(
@@ -45,154 +37,135 @@ class UniFiClient:
         self.verify_tls = bool(verify_tls)
         self.timeout = ClientTimeout(total=timeout)
 
-        # Will be set after login + probe
-        self._use_proxy = True   # assume UniFi OS until proven otherwise
+        # Determined after login+probe:
+        self._api_root: Optional[str] = None   # "/proxy/network/api" or "/api"
+
+    # ------------- low-level HTTP -------------
 
     async def _session(self, hass):
-        # Reuse HA's session; honour TLS verify toggle
         return async_get_clientsession(hass, verify_ssl=self.verify_tls)
 
-    async def _post_json(self, hass, path: str, payload: Any) -> tuple[int, str]:
+    async def _post_json(self, hass, path: str, payload: dict) -> tuple[int, str]:
         sess = await self._session(hass)
         async with sess.post(self.base + path, json=payload, timeout=self.timeout) as resp:
             txt = await resp.text()
-            _LOGGER.debug("UniFi POST %s -> %s, body[0:200]=%r", path, resp.status, txt[:200])
             return resp.status, txt
 
-    async def _get_json_text(self, hass, path: str) -> tuple[int, str]:
+    async def _get_json_any(self, hass, full_path: str) -> tuple[int, str]:
+        """GET full path (already absolute). Returns (status, body_text)."""
         sess = await self._session(hass)
-        async with sess.get(self.base + path, timeout=self.timeout) as resp:
+        async with sess.get(self.base + full_path, timeout=self.timeout) as resp:
             txt = await resp.text()
-            _LOGGER.debug("UniFi GET %s -> %s, body[0:200]=%r", path, resp.status, txt[:200])
             return resp.status, txt
 
-    async def _login(self, hass) -> bool:
-        """
-        Attempt UniFi OS login first, then legacy.
-        Returns True if any succeeds.
-        """
-        payload = {"username": self.user, "password": self.passwd}
-
-        # 1) UniFi OS (UDM/UDR/CK Gen2)
-        try:
-            status, body = await self._post_json(hass, "/api/auth/login", payload)
-            if status == 200:
-                _LOGGER.debug("UniFi: logged in via /api/auth/login")
-                return True
-            _LOGGER.debug("UniFi: /api/auth/login failed with %s", status)
-        except ClientError as exc:
-            _LOGGER.debug("UniFi: /api/auth/login client error: %s", exc)
-
-        # 2) Legacy / Stand-alone
-        try:
-            status, body = await self._post_json(hass, "/api/login", payload)
-            if status == 200:
-                _LOGGER.debug("UniFi: logged in via /api/login")
-                return True
-            _LOGGER.debug("UniFi: /api/login failed with %s", status)
-        except ClientError as exc:
-            _LOGGER.debug("UniFi: /api/login client error: %s", exc)
-
-        _LOGGER.warning("UniFi: login failed at %s", self.base)
-        return False
-
-    async def _probe_api_root(self, hass) -> bool:
-        """
-        After login, decide whether we need the '/proxy/network' prefix.
-        Returns True if we could determine a working root.
-        """
-        # Probe UniFi OS path
-        try:
-            status, txt = await self._get_json_text(hass, "/proxy/network/api/self/sites")
-            if status == 200:
-                # Should be {"meta":{"rc":"ok"}, "data":[ ... ]}
-                try:
-                    data = json.loads(txt)
-                    if isinstance(data, dict) and data.get("meta", {}).get("rc") == "ok":
-                        self._use_proxy = True
-                        _LOGGER.debug("UniFi: using UniFi OS proxy root (/proxy/network)")
-                        return True
-                except Exception:
-                    pass
-        except ClientError as exc:
-            _LOGGER.debug("UniFi: probe proxy root failed: %s", exc)
-
-        # Probe legacy path
-        try:
-            status, txt = await self._get_json_text(hass, "/api/self/sites")
-            if status == 200:
-                try:
-                    data = json.loads(txt)
-                    if isinstance(data, dict) and data.get("meta", {}).get("rc") == "ok":
-                        self._use_proxy = False
-                        _LOGGER.debug("UniFi: using legacy root (/api)")
-                        return True
-                except Exception:
-                    pass
-        except ClientError as exc:
-            _LOGGER.debug("UniFi: probe legacy root failed: %s", exc)
-
-        _LOGGER.warning("UniFi: could not determine API root after login (proxy vs legacy).")
-        return False
-
-    def _path(self, tail: str) -> str:
-        """
-        Build the request path given an API 'tail' that starts with 'api/...'.
-        Example tail: 'api/s/{site}/stat/sta'
-        """
-        if self._use_proxy:
-            return f"/proxy/network/{tail}"
-        return f"/{tail}"
-
-    async def _get_json_obj(self, hass, path: str) -> Any:
-        status, txt = await self._get_json_text(hass, path)
+    async def _get_json(self, hass, path_under_root: str) -> Any:
+        """GET using decided API root, e.g. path_under_root='/s/{site}/stat/sta'."""
+        if not self._api_root:
+            raise RuntimeError("UniFi: API root not determined")
+        status, txt = await self._get_json_any(hass, self._api_root + path_under_root)
+        _LOGGER.debug("UniFi GET %s -> %s body[0:200]=%r", self._api_root + path_under_root, status, txt[:200])
         if status >= 400:
             raise RuntimeError(f"HTTP {status}: {txt[:200]!r}")
         try:
             return json.loads(txt)
         except Exception:
-            raise RuntimeError(f"Non-JSON at {path}: {txt[:160]!r}")
+            raise RuntimeError(f"Non-JSON at {self._api_root + path_under_root}: {txt[:120]!r}")
+
+    # ------------- login + root detection -------------
+
+    async def _login(self, hass) -> bool:
+        """Try UniFi OS first, then legacy. Succeeds if any returns 200."""
+        if not (self.base and self.user and self.passwd):
+            _LOGGER.warning("UniFi: missing base/user/pass")
+            return False
+
+        payload = {"username": self.user, "password": self.passwd}
+
+        # 1) UniFi OS
+        try:
+            status, txt = await self._post_json(hass, "/api/auth/login", payload)
+            _LOGGER.debug("UniFi login /api/auth/login -> %s body[0:160]=%r", status, txt[:160])
+            if status == 200:
+                return True
+        except ClientError as exc:
+            _LOGGER.debug("UniFi OS login failed: %s", exc)
+
+        # 2) Legacy
+        try:
+            status, txt = await self._post_json(hass, "/api/login", payload)
+            _LOGGER.debug("UniFi legacy login /api/login -> %s body[0:160]=%r", status, txt[:160])
+            if status == 200:
+                return True
+        except ClientError as exc:
+            _LOGGER.debug("UniFi legacy login failed: %s", exc)
+
+        _LOGGER.warning("UniFi: login failed at %s", self.base)
+        return False
+
+    async def _detect_api_root(self, hass) -> bool:
+        """
+        After login, probe which API base works.
+        Returns True if we picked a root.
+        """
+        # Try UniFi OS proxy first
+        for candidate in ("/proxy/network/api", "/api"):
+            try:
+                status, txt = await self._get_json_any(hass, f"{candidate}/self/sites")
+                _LOGGER.debug("UniFi probe %s/self/sites -> %s", candidate, status)
+                if status == 200:
+                    # Validate JSON
+                    try:
+                        data = json.loads(txt)
+                        if isinstance(data, dict) and data.get("meta", {}).get("rc") in ("ok", "busy", "error"):
+                            self._api_root = candidate
+                            _LOGGER.debug("UniFi: selected API root %s (meta.rc=%s)", candidate, data["meta"].get("rc"))
+                            return True
+                        # Some controllers return just {"data":[...]} without meta
+                        if isinstance(data, dict) and "data" in data:
+                            self._api_root = candidate
+                            _LOGGER.debug("UniFi: selected API root %s (data-only)", candidate)
+                            return True
+                    except Exception:
+                        # Even if JSON parse fails but 200 status, keep probing next candidate
+                        _LOGGER.debug("UniFi: JSON at %s/self/sites could not be parsed; trying next", candidate)
+            except ClientError as exc:
+                _LOGGER.debug("UniFi: probe %s/self/sites failed: %s", candidate, exc)
+
+        return False
 
     async def _ensure_ready(self, hass) -> bool:
-        if not (self.base and self.user and self.passwd):
-            _LOGGER.debug("UniFi: missing base/user/pass; skipping.")
-            return False
+        if self._api_root:
+            return True
         if not await self._login(hass):
             return False
-        if not await self._probe_api_root(hass):
-            # As a last resort, stay in proxy mode and let requests fail loudly
-            self._use_proxy = True
+        if not await self._detect_api_root(hass):
+            _LOGGER.error("UniFi: could not determine API root after login (proxy vs legacy). "
+                          "Check URL/port. Try the one that worked in your browser (e.g. https://host:4334).")
+            return False
+        _LOGGER.debug("UniFi ready. api_root=%s site=%s", self._api_root, self.site)
         return True
 
+    # ------------- public API -------------
+
     async def fetch_clients(self, hass) -> list[dict]:
-        """
-        Return controller 'sta' records.
-        """
-        ok = await self._ensure_ready(hass)
-        if not ok:
+        if not await self._ensure_ready(hass):
             return []
-        path = self._path(f"api/s/{self.site}/stat/sta")
         try:
-            data = await self._get_json_obj(hass, path)
+            data = await self._get_json(hass, f"/s/{self.site}/stat/sta")
             rows = data.get("data", []) if isinstance(data, dict) else []
-            _LOGGER.debug("UniFi: %s -> %d client rows", path, len(rows))
+            _LOGGER.debug("UniFi: fetched %d clients", len(rows))
             return rows
         except Exception as exc:
             _LOGGER.warning("UniFi fetch clients failed: %s", exc)
             return []
 
     async def fetch_devices(self, hass) -> list[dict]:
-        """
-        Return controller device records (for AP names, etc).
-        """
-        ok = await self._ensure_ready(hass)
-        if not ok:
+        if not await self._ensure_ready(hass):
             return []
-        path = self._path(f"api/s/{self.site}/stat/device")
         try:
-            data = await self._get_json_obj(hass, path)
+            data = await self._get_json(hass, f"/s/{self.site}/stat/device")
             rows = data.get("data", []) if isinstance(data, dict) else []
-            _LOGGER.debug("UniFi: %s -> %d device rows", path, len(rows))
+            _LOGGER.debug("UniFi: fetched %d devices", len(rows))
             return rows
         except Exception as exc:
             _LOGGER.debug("UniFi fetch devices failed: %s", exc)
