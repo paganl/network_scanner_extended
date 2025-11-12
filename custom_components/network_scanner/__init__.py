@@ -8,51 +8,35 @@ defined in ``coordinator.py`` to perform periodic updates.
 """
 
 from __future__ import annotations
-
 import logging
-from typing import Any
-
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.typing import ConfigType
+from homeassistant.const import Platform
 
 from .const import DOMAIN
-from .coordinator import NetworkScannerCoordinator
+from .coordinator import async_setup_coordinator, async_unload_coordinator
 
 _LOGGER = logging.getLogger(__name__)
+PLATFORMS = [Platform.SENSOR]
 
-PLATFORMS: list[str] = ["sensor"]
-
-
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up Network Scanner from a config entry."""
-    coordinator = NetworkScannerCoordinator(hass, entry)
-    await coordinator.async_config_entry_first_refresh()
-    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
-
-    # Expose a service to trigger a manual refresh
-    async def _handle_refresh_service(call: Any) -> None:
-        await coordinator.async_request_refresh()
-
-    hass.services.async_register(DOMAIN, "refresh", _handle_refresh_service)
-
-    # Forward the entry to platform(s)
-    await hass.config_entries.async_forward_entry_setup(entry, "sensor")
-
-    # Listen for option changes and reload the entry when they occur
-    entry.async_on_unload(entry.add_update_listener(async_reload_entry))
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     return True
 
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    _LOGGER.debug("Setting up %s entry %s", DOMAIN, entry.entry_id)
+    entry.async_on_unload(entry.add_update_listener(async_reload_entry))
+    await async_setup_coordinator(hass, entry)
+    # NOTE: Use plural API
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    return True
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Unload a config entry."""
-    # Remove coordinator
-    coordinator: NetworkScannerCoordinator = hass.data[DOMAIN].pop(entry.entry_id)
-    await coordinator.async_remove()
-    # Unload the platform(s)
-    return await hass.config_entries.async_forward_entry_unload(entry, "sensor")
-
+    _LOGGER.debug("Unloading %s entry %s", DOMAIN, entry.entry_id)
+    ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    ok = await async_unload_coordinator(hass, entry) and ok
+    return ok
 
 async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Reload config entry when options change."""
     await async_unload_entry(hass, entry)
     await async_setup_entry(hass, entry)
