@@ -105,7 +105,7 @@ class NetworkScannerConfigFlow(ConfigFlow, domain=DOMAIN):
         suggested_mins = DEFAULT_SCAN_INTERVAL_MINUTES
 
         schema = vol.Schema({
-            vol.Required("ip_range", description={"suggested_value": DEFAULT_IP_RANGE}): str,
+            vol.Optional("ip_range", description={"suggested_value": DEFAULT_IP_RANGE}): str,
             vol.Optional("nmap_args", description={"suggested_value": DEFAULT_NMAP_ARGS}): str,
             vol.Optional("scan_interval_minutes", description={"suggested_value": suggested_mins}): MinutesNumberSelector(),
 
@@ -250,7 +250,7 @@ class NetworkScannerOptionsFlow(OptionsFlow):
         prov = opts.get(CONF_ARP_PROVIDER, data.get(CONF_ARP_PROVIDER, DEFAULT_ARP_PROVIDER))
 
         schema_dict: Dict[Any, Any] = {
-            vol.Required("ip_range", description={"suggested_value": opts.get("ip_range", data.get("ip_range", DEFAULT_IP_RANGE))}): str,
+            vol.Optional("ip_range", description={"suggested_value": opts.get("ip_range", data.get("ip_range", DEFAULT_IP_RANGE))}): str,
             vol.Optional("nmap_args", description={"suggested_value": opts.get("nmap_args", data.get("nmap_args", DEFAULT_NMAP_ARGS))}): str,
             vol.Optional("scan_interval_minutes", description={"suggested_value": saved_mins}): MinutesNumberSelector(),
 
