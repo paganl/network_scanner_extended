@@ -1,0 +1,7 @@
+
+refresh:
+  name: Manual refresh
+  description: Request an immediate refresh from the configured provider.
+run_nmap:
+  name: Run nmap enrichment
+  description: If enabled in options, run a single nmap scan to enrich host cache.
