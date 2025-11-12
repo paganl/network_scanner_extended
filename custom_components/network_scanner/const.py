@@ -1,26 +1,25 @@
-"""Constants for the Network Scanner integration.
+from __future__ import annotations
 
-These values centralise configuration keys and defaults used across
-multiple modules of the component.  Updating a key here will
-automatically propagate to the config flow, coordinator and sensor.
-"""
+DOMAIN = "network_scanner"
 
-DOMAIN: str = "network_scanner"
+CONF_URL        = "url"
+CONF_KEY        = "key"       # OPNsense
+CONF_SECRET     = "secret"    # OPNsense
+CONF_NAME       = "name"      # username (AdGuard/UniFi)
+CONF_PASSWORD   = "password"  # password (AdGuard/UniFi)
+CONF_INTERVAL_MIN = "interval_min"
+CONF_VERIFY_SSL = "verify_ssl"
+CONF_TOKEN      = "token"     # UniFi API token (optional)
+CONF_PROVIDER   = "provider"  # "opnsense" | "unifi" | "adguard"
 
-# Configuration and option keys
-CONF_PROVIDER: str = "provider"
-CONF_URL: str = "url"
-CONF_API_KEY: str = "api_key"
-CONF_API_SECRET: str = "api_secret"
-CONF_USERNAME: str = "username"
-CONF_PASSWORD: str = "password"
-CONF_VERIFY_SSL: str = "verify_ssl"
-CONF_INTERVAL: str = "interval_min"
-
-# Supported providers for device discovery.  Additional providers can be
-# added here and referenced in both the config flow and coordinator.
-PROVIDERS: list[str] = ["opnsense"]
-
-# Default polling interval in minutes.  Used if no value is
-# explicitly configured via the options flow.
-DEFAULT_INTERVAL: int = 2
+DEFAULT_OPTIONS = {
+    CONF_PROVIDER: "opnsense",
+    CONF_URL: "",
+    CONF_KEY: "",
+    CONF_SECRET: "",
+    CONF_NAME: "",
+    CONF_PASSWORD: "",
+    CONF_TOKEN: "",
+    CONF_VERIFY_SSL: False,
+    CONF_INTERVAL_MIN: 3,
+}
