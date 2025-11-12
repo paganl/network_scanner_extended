@@ -213,6 +213,28 @@ class OPNsenseARPClient:
         _LOGGER.warning("All OPNsense ARP endpoints failed or returned no rows")
         return []
 
+    async def async_get_arp(self) -> Dict[str, str]:
+        """Return a mapping of IP addresses to MAC addresses.
+
+        Some parts of the integration (or older versions) expect a
+        method named ``async_get_arp`` returning a dictionary of
+        ``{ip: mac}``.  To preserve compatibility this method calls
+        :meth:`async_get_rows` and normalises the result into a map.
+
+        Returns an empty dict on failure or if no devices are found.
+        """
+        try:
+            rows = await self.async_get_rows()
+        except Exception:
+            return {}
+        mapping: Dict[str, str] = {}
+        for row in rows:
+            ip = row.get("ip")
+            mac = row.get("mac")
+            if ip and mac:
+                mapping[str(ip)] = str(mac)
+        return mapping
+
     # -- parsing helpers ----------------------------------------------------
 
     def _parse_any_rows(self, data: Any) -> List[Dict[str, Any]]:
