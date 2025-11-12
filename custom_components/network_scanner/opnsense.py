@@ -1,149 +1,199 @@
-# custom_components/network_scanner/opnsense.py
 from __future__ import annotations
-from typing import Dict, Any, Iterable
-import json
-import logging
 
-from aiohttp import ClientError, ClientTimeout, BasicAuth
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
+import logging
+from typing import Any, Dict, List
+
+from aiohttp import ClientSession, ClientTimeout, BasicAuth
 
 _LOGGER = logging.getLogger(__name__)
 
-def _clean_mac(s: str | None) -> str:
-    m = (s or "").upper()
-    if not m or m in ("(INCOMPLETE)", "00:00:00:00:00:00", "*"):
-        return ""
-    return m
+
+def _first(d: dict, keys: list[str]) -> str:
+    for k in keys:
+        v = d.get(k)
+        if v:
+            return str(v)
+    return ""
+
 
 class OPNsenseARPClient:
     """
-    Very forgiving ARP/ND fetcher for OPNsense.
-    Tries the modern POST /api/diagnostics/interface/search_arp first,
-    then a handful of GET fallbacks seen in the wild.
+    POST-first ARP fetcher for OPNsense with robust fallbacks.
+    - Tries POST /api/diagnostics/interface/search_arp (preferred)
+    - Falls back to several GET endpoints seen across OPNsense versions
     """
 
-    def __init__(self, base_url: str, key: str, secret: str, verify_tls: bool = True, timeout: int = 10) -> None:
-        self.base_url = (base_url or "").rstrip("/")
-        self.key = key or ""
-        self.secret = secret or ""
-        self.verify_tls = bool(verify_tls)
-        self.timeout = ClientTimeout(total=timeout)
-        self._auth = BasicAuth(self.key, self.secret)
+    def __init__(
+        self,
+        session: ClientSession,
+        base_url: str,
+        key: str,
+        secret: str,
+        verify_ssl: bool = True,
+        timeout_s: int = 4,
+    ) -> None:
+        self._session = session
+        self._base = (base_url or "").rstrip("/")
+        self._auth = BasicAuth(key or "", secret or "")
+        self._ssl = bool(verify_ssl)
+        self._timeout = ClientTimeout(total=timeout_s)
 
-        # GET fallback candidates (shape differs by image/version)
-        self._get_candidates: Iterable[str] = (
-            "/api/diagnostics/arp/search",
-            "/api/diagnostics/arp",
-            "/api/diagnostics/interface/getArp",
-            "/api/diagnostics/if/arp",
-            "/api/diagnostics/neighbor/search",
-            "/api/routes/neighbor",
-        )
+        # GET fallbacks (mix of historical endpoints)
+        self._get_candidates: List[str] = [
+            "/diagnostics/interface/get_arp",
+            "/diagnostics/arp/get_arp",
+            "/diagnostics/arp/search",
+            "/diagnostics/arp",
+            "/diagnostics/interface/getArp",
+            "/diagnostics/if/arp",
+            "/diagnostics/neighbor/search",
+            "/routes/neighbor",
+        ]
 
-    async def fetch_map(self, hass) -> Dict[str, str]:
-        """Return { ip: MAC } with MAC uppercased, or {} on failure."""
-        if not self.base_url or not self.key or not self.secret:
-            return {}
+    def _build_url(self, path: str) -> str:
+        # Ensure exactly one /api in the final URL
+        base = self._base
+        if not base.endswith("/api"):
+            base = f"{base}/api"
+        return f"{base}{path}"
 
-        # Prefer the POST interface because it supports filtering and stable JSON.
-        post_paths = (
-            "/api/diagnostics/interface/search_arp",
-            "/api/diagnostics/interface/search_arp/",
-        )
+    async def _post_json(self, path: str, data: Dict[str, Any]) -> dict:
+        url = self._build_url(path)
+        headers = {
+            "Accept": "application/json",
+            "X-Requested-With": "XMLHttpRequest",
+        }
+        async with self._session.post(
+            url,
+            auth=self._auth,
+            data=data,                 # form-encoded, matches OPNsense UI calls
+            headers=headers,
+            timeout=self._timeout,
+            ssl=self._ssl,
+        ) as resp:
+            text = await resp.text()
+            if resp.status >= 400:
+                _LOGGER.debug("OPNsense POST %s -> HTTP %s body=%s", url, resp.status, text[:256])
+            resp.raise_for_status()
+            try:
+                return await resp.json()
+            except Exception:
+                _LOGGER.debug("OPNsense POST %s returned non-JSON: %s", url, text[:256])
+                raise
 
-        session = async_get_clientsession(hass, verify_ssl=self.verify_tls)
+    async def _get_json(self, path: str) -> dict:
+        url = self._build_url(path)
+        headers = {"Accept": "application/json"}
+        async with self._session.get(
+            url,
+            auth=self._auth,
+            headers=headers,
+            timeout=self._timeout,
+            ssl=self._ssl,
+        ) as resp:
+            text = await resp.text()
+            if resp.status >= 400:
+                _LOGGER.debug("OPNsense GET %s -> HTTP %s body=%s", url, resp.status, text[:256])
+            resp.raise_for_status()
+            try:
+                return await resp.json()
+            except Exception:
+                _LOGGER.debug("OPNsense GET %s returned non-JSON: %s", url, text[:256])
+                raise
 
+    async def async_get_arp(self) -> List[Dict[str, Any]]:
+        # 1) Preferred POST (modern, stable shape)
+        post_paths = [
+            "/diagnostics/interface/search_arp",
+            "/diagnostics/interface/search_arp/",
+        ]
         payload = {"current": 1, "rowCount": 9999, "searchPhrase": ""}
-        headers = {"Accept": "application/json", "X-Requested-With": "XMLHttpRequest"}
-
-        # Try POST first
-        for path in post_paths:
-            url = f"{self.base_url}{path}"
+        for p in post_paths:
             try:
-                async with session.post(
-                    url, auth=self._auth, data=payload, timeout=self.timeout, headers=headers
-                ) as resp:
-                    text = await resp.text()
-                    if resp.status >= 400:
-                        raise RuntimeError(f"HTTP {resp.status}: {text[:200]!r}")
-                    data = json.loads(text)
-                    mapping = self._parse_any(data)
-                    if mapping:
-                        _LOGGER.debug("OPNsense ARP: parsed %d entries from %s", len(mapping), path)
-                        return mapping
-            except (ClientError, json.JSONDecodeError, RuntimeError) as exc:
-                _LOGGER.debug("OPNsense ARP: POST %s unusable: %s", path, exc)
+                data = await self._post_json(p, payload)
+                rows = self._parse_any_rows(data)
+                if rows:
+                    _LOGGER.debug("OPNsense ARP: parsed %d entries from POST %s", len(rows), p)
+                    return rows
             except Exception as exc:
-                _LOGGER.debug("OPNsense ARP: POST %s unexpected: %s", path, exc)
+                _LOGGER.debug("OPNsense ARP: POST %s unusable: %s", p, exc)
 
-        # Fallback to several GET endpoints
-        for path in self._get_candidates:
-            url = f"{self.base_url}{path}"
+        # 2) GET fallbacks (versions vary wildly)
+        for p in self._get_candidates:
             try:
-                async with session.get(url, auth=self._auth, timeout=self.timeout, headers=headers) as resp:
-                    if resp.status >= 400:
-                        continue
-                    text = await resp.text()
-                data = json.loads(text)
-                mapping = self._parse_any(data)
-                if mapping:
-                    _LOGGER.debug("OPNsense ARP: parsed %d entries from %s", len(mapping), path)
-                    return mapping
-            except (ClientError, json.JSONDecodeError) as exc:
-                _LOGGER.debug("OPNsense ARP: GET %s unusable: %s", path, exc)
+                data = await self._get_json(p)
+                rows = self._parse_any_rows(data)
+                if rows:
+                    _LOGGER.debug("OPNsense ARP: parsed %d entries from GET %s", len(rows), p)
+                    return rows
             except Exception as exc:
-                _LOGGER.debug("OPNsense ARP: GET %s unexpected: %s", path, exc)
+                _LOGGER.debug("OPNsense ARP: GET %s unusable: %s", p, exc)
 
-        _LOGGER.warning("OPNsense ARP: no usable endpoint at %s", self.base_url)
-        return {}
+        _LOGGER.warning("All OPNsense ARP endpoints failed or returned no rows")
+        return []
 
-    # ---------------- parsing helpers ----------------
+    # ---------- parsing ----------
 
-    def _parse_any(self, data: Any) -> Dict[str, str]:
+    def _parse_any_rows(self, data: Any) -> List[Dict[str, Any]]:
         """
-        Accept a variety of JSON shapes and return {ip: MAC}.
+        Accept multiple JSON shapes and return a list of {mac, ip, hostname, ...}.
         Supports:
-          - {"rows":[{...}]}
-          - {"data":[{...}]}
+          - {"rows":[{...}]}, {"data":[{...}]}, {"arp":[{...}]}, nested dicts
           - flat lists of dicts or lists
-          - nested dicts containing such lists
         """
         if isinstance(data, list):
             return self._parse_list_of_dicts(data) or self._parse_list_of_lists(data)
 
         if isinstance(data, dict):
-            for key in ("rows", "data", "arp", "neighbors", "neighbours", "entries"):
+            # common containers
+            for key in ("rows", "data", "arp", "neighbors", "neighbours", "entries", "items", "result"):
                 sub = data.get(key)
                 if isinstance(sub, list):
-                    m = self._parse_list_of_dicts(sub) or self._parse_list_of_lists(sub)
-                    if m:
-                        return m
-            # Nested structures
+                    out = self._parse_list_of_dicts(sub) or self._parse_list_of_lists(sub)
+                    if out:
+                        return out
+            # nested scan
             for _, val in data.items():
                 if isinstance(val, (dict, list)):
-                    m = self._parse_any(val)
-                    if m:
-                        return m
+                    out = self._parse_any_rows(val)
+                    if out:
+                        return out
+        return []
 
-        return {}
-
-    def _parse_list_of_dicts(self, rows: list) -> Dict[str, str]:
-        out: Dict[str, str] = {}
+    def _parse_list_of_dicts(self, rows: list) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
         for row in rows:
             if not isinstance(row, dict):
                 continue
-            ip = row.get("ip") or row.get("ipaddr") or row.get("ipaddress") or row.get("address") or row.get("inet") or ""
-            mac = row.get("mac") or row.get("macaddr") or row.get("lladdr") or row.get("ether") or row.get("hwaddr") or ""
-            mac = _clean_mac(mac)
-            if ip and mac and mac != "(INCOMPLETE)":
-                out[str(ip)] = mac
+            ip = _first(row, ["ip", "ipaddr", "ipaddress", "address", "inet"])
+            mac = _first(row, ["mac", "macaddr", "lladdr", "ether", "hwaddr"])
+            host = _first(row, ["hostname", "fqdn", "name"])
+            mac_u = (mac or "").upper()
+            if mac_u in ("", "(INCOMPLETE)", "00:00:00:00:00:00", "*"):
+                continue
+            if ip and mac_u:
+                out.append({
+                    "mac": mac_u,
+                    "ip": ip,
+                    "hostname": host,
+                    "vendor": "",
+                    "source": "opnsense",
+                })
         return out
 
-    def _parse_list_of_lists(self, rows: list) -> Dict[str, str]:
-        out: Dict[str, str] = {}
+    def _parse_list_of_lists(self, rows: list) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
         for item in rows:
             if isinstance(item, (list, tuple)) and len(item) >= 2:
-                ip, mac = str(item[0]), _clean_mac(str(item[1]))
-                if ip and mac:
-                    out[ip] = mac
+                ip = str(item[0])
+                mac_u = str(item[1]).upper()
+                if mac_u in ("", "(INCOMPLETE)", "00:00:00:00:00:00", "*"):
+                    continue
+                out.append({
+                    "mac": mac_u,
+                    "ip": ip,
+                    "hostname": "",
+                    "vendor": "",
+                    "source": "opnsense",
+                })
         return out
