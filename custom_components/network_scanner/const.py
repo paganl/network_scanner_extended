@@ -1,30 +1,26 @@
+"""Constants for the Network Scanner integration.
 
-from __future__ import annotations
+These values centralise configuration keys and defaults used across
+multiple modules of the component.  Updating a key here will
+automatically propagate to the config flow, coordinator and sensor.
+"""
 
-DOMAIN = "network_scanner"
+DOMAIN: str = "network_scanner"
 
-CONF_PROVIDER = "provider"
-CONF_URL = "url"
-CONF_KEY = "key"
-CONF_SECRET = "secret"
-CONF_NAME = "name"
-CONF_PASSWORD = "password"
-CONF_CIDRS = "cidrs"
-CONF_INTERVAL_MIN = "interval_min"
-CONF_USE_NMAP = "use_nmap"
-CONF_NMAP_ARGS = "nmap_args"
-CONF_MAC_DIRECTORY = "mac_directory"
+# Configuration and option keys
+CONF_PROVIDER: str = "provider"
+CONF_URL: str = "url"
+CONF_API_KEY: str = "api_key"
+CONF_API_SECRET: str = "api_secret"
+CONF_USERNAME: str = "username"
+CONF_PASSWORD: str = "password"
+CONF_VERIFY_SSL: str = "verify_ssl"
+CONF_INTERVAL: str = "interval_min"
 
-DEFAULT_OPTIONS = {
-    CONF_PROVIDER: "opnsense",         # or "adguard"
-    CONF_URL: "",
-    CONF_KEY: "",
-    CONF_SECRET: "",
-    CONF_NAME: "",
-    CONF_PASSWORD: "",
-    CONF_CIDRS: ["192.168.1.0/24"],
-    CONF_INTERVAL_MIN: 3,
-    CONF_USE_NMAP: False,
-    CONF_NMAP_ARGS: "-sn --max-retries 1 --host-timeout 5s",
-    CONF_MAC_DIRECTORY: "",
-}
+# Supported providers for device discovery.  Additional providers can be
+# added here and referenced in both the config flow and coordinator.
+PROVIDERS: list[str] = ["opnsense"]
+
+# Default polling interval in minutes.  Used if no value is
+# explicitly configured via the options flow.
+DEFAULT_INTERVAL: int = 2
