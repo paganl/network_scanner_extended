@@ -1,87 +1,69 @@
 """Config and options flow for the Network Scanner integration."""
 
 from __future__ import annotations
-
+from typing import Any, Dict, Optional
 import voluptuous as vol
 from homeassistant import config_entries
-from homeassistant.core import callback
+from homeassistant.data_entry_flow import FlowResult
 
 from .const import (
-    DOMAIN,
-    CONF_PROVIDER,
-    CONF_URL,
-    CONF_API_KEY,
-    CONF_API_SECRET,
-    CONF_USERNAME,
-    CONF_PASSWORD,
-    CONF_VERIFY_SSL,
-    CONF_INTERVAL,
-    PROVIDERS,
-    DEFAULT_INTERVAL,
+    DOMAIN, DEFAULT_OPTIONS,
+    CONF_PROVIDER, CONF_URL, CONF_KEY, CONF_SECRET,
+    CONF_NAME, CONF_PASSWORD, CONF_TOKEN,
+    CONF_VERIFY_SSL, CONF_INTERVAL_MIN,
 )
 
-
-class NetworkScannerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Handle a config flow for Network Scanner."""
-
+class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
 
-    async def async_step_user(self, user_input: dict[str, str] | None = None):  # type: ignore[type-arg]
-        """Handle the initial step of a user initiated flow."""
+    async def async_step_user(self, user_input: Optional[Dict[str, Any]] = None) -> FlowResult:
         if user_input is not None:
-            # Create the config entry immediately.  Home Assistant will
-            # subsequently call async_setup_entry in __init__.py.
-            return self.async_create_entry(title=user_input[CONF_PROVIDER], data=user_input)
+            prov = user_input.get(CONF_PROVIDER, "opnsense")
+            url  = (user_input.get(CONF_URL, "") or "").rstrip("/")
+            if url:
+                await self.async_set_unique_id(f"{prov}:{url}")
+                self._abort_if_unique_id_configured()
+            return self.async_create_entry(
+                title=f"Network Scanner ({prov})",
+                data={}, options=user_input,
+            )
 
-        # Build the form schema.  We provide defaults only for simple
-        # values to avoid persisting stale credentials on re-runs.
-        data_schema = vol.Schema(
-            {
-                vol.Required(CONF_PROVIDER, default=PROVIDERS[0]): vol.In(PROVIDERS),
-                vol.Required(CONF_URL): str,
-                vol.Optional(CONF_API_KEY): str,
-                vol.Optional(CONF_API_SECRET): str,
-                vol.Optional(CONF_USERNAME): str,
-                vol.Optional(CONF_PASSWORD): str,
-                vol.Optional(CONF_VERIFY_SSL, default=False): bool,
-                vol.Optional(CONF_INTERVAL, default=DEFAULT_INTERVAL): vol.Coerce(int),
-            }
-        )
-        return self.async_show_form(step_id="user", data_schema=data_schema)
+        o = DEFAULT_OPTIONS
+        schema = vol.Schema({
+            vol.Required(CONF_PROVIDER, default=o[CONF_PROVIDER]): vol.In(["opnsense","unifi","adguard"]),
+            vol.Optional(CONF_URL, default=o[CONF_URL]): str,
+            vol.Optional(CONF_KEY, default=o[CONF_KEY]): str,         # OPNsense
+            vol.Optional(CONF_SECRET, default=o[CONF_SECRET]): str,   # OPNsense
+            vol.Optional(CONF_NAME, default=o[CONF_NAME]): str,       # UniFi/AdGuard
+            vol.Optional(CONF_PASSWORD, default=o[CONF_PASSWORD]): str,
+            vol.Optional(CONF_TOKEN, default=o[CONF_TOKEN]): str,     # UniFi
+            vol.Required(CONF_VERIFY_SSL, default=o[CONF_VERIFY_SSL]): bool,
+            vol.Required(CONF_INTERVAL_MIN, default=o[CONF_INTERVAL_MIN]): int,
+        })
+        return self.async_show_form(step_id="user", data_schema=schema)
 
     @staticmethod
-    @callback
-    def async_get_options_flow(config_entry: config_entries.ConfigEntry):
-        """Return the options flow handler."""
-        return NetworkScannerOptionsFlow(config_entry)
+    def async_get_options_flow(config_entry):
+        return OptionsFlowHandler(config_entry)
 
+class OptionsFlowHandler(config_entries.OptionsFlow):
+    def __init__(self, entry):
+        self.entry = entry
 
-class NetworkScannerOptionsFlow(config_entries.OptionsFlow):
-    """Handle an options flow for Network Scanner."""
-
-    def __init__(self, entry: config_entries.ConfigEntry) -> None:
-        self.config_entry = entry
-
-    async def async_step_init(self, user_input: dict[str, str] | None = None):  # type: ignore[type-arg]
-        """Manage the network scanner options."""
+    async def async_step_init(self, user_input: Optional[Dict[str, Any]] = None) -> FlowResult:
         if user_input is not None:
-            # Update the config entry options with user selections
             return self.async_create_entry(title="", data=user_input)
 
-        # Merge current data and options to provide defaults
-        current = {**self.config_entry.data, **(self.config_entry.options or {})}
-
-        # Build the options schema with current values as defaults
-        options_schema = vol.Schema(
-            {
-                vol.Required(CONF_PROVIDER, default=current.get(CONF_PROVIDER, PROVIDERS[0])): vol.In(PROVIDERS),
-                vol.Required(CONF_URL, default=current.get(CONF_URL, "")): str,
-                vol.Optional(CONF_API_KEY, default=current.get(CONF_API_KEY, "")): str,
-                vol.Optional(CONF_API_SECRET, default=current.get(CONF_API_SECRET, "")): str,
-                vol.Optional(CONF_USERNAME, default=current.get(CONF_USERNAME, "")): str,
-                vol.Optional(CONF_PASSWORD, default=current.get(CONF_PASSWORD, "")): str,
-                vol.Optional(CONF_VERIFY_SSL, default=current.get(CONF_VERIFY_SSL, False)): bool,
-                vol.Optional(CONF_INTERVAL, default=current.get(CONF_INTERVAL, DEFAULT_INTERVAL)): vol.Coerce(int),
-            }
-        )
-        return self.async_show_form(step_id="init", data_schema=options_schema)
+        o = {**DEFAULT_OPTIONS, **self.entry.options}
+        schema = vol.Schema({
+            vol.Required(CONF_PROVIDER, default=o.get(CONF_PROVIDER,"opnsense")): vol.In(["opnsense","unifi","adguard"]),
+            vol.Optional(CONF_URL, default=o.get(CONF_URL, "")): str,
+            vol.Optional(CONF_KEY, default=o.get(CONF_KEY, "")): str,
+            vol.Optional(CONF_SECRET, default=o.get(CONF_SECRET, "")): str,
+            vol.Optional(CONF_NAME, default=o.get(CONF_NAME, "")): str,
+            vol.Optional(CONF_PASSWORD, default=o.get(CONF_PASSWORD, "")): str,
+            vol.Optional(CONF_TOKEN, default=o.get(CONF_TOKEN, "")): str,
+            vol.Required(CONF_VERIFY_SSL, default=o.get(CONF_VERIFY_SSL, False)): bool,
+            vol.Required(CONF_INTERVAL_MIN, default=o.get(CONF_INTERVAL_MIN, 3)): int,
+        })
+        return self.async_show_form(step_id="init", data_schema=schema)
