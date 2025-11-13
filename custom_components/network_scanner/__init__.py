@@ -24,15 +24,12 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     return True
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    _LOGGER.debug("Setting up %s entry %s", DOMAIN, entry.entry_id)
     entry.async_on_unload(entry.add_update_listener(async_reload_entry))
     await async_setup_coordinator(hass, entry)
-    # NOTE: Use plural API
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    _LOGGER.debug("Unloading %s entry %s", DOMAIN, entry.entry_id)
     ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     ok = await async_unload_coordinator(hass, entry) and ok
     return ok
