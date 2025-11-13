@@ -80,6 +80,8 @@ class NetworkScannerCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                 "site": d.get("site") or "",
                 "new": bool((d.get("derived") or {}).get("new_device")),
                 "risk": (d.get("derived") or {}).get("risk_score", 0),
+                "first_seen": d.get("first_seen") or "",
+                "last_seen": d.get("last_seen") or "",
                 "source_str": ",".join(d.get("sources", [])) if d.get("sources") else (d.get("source") or ""),
             })
     
