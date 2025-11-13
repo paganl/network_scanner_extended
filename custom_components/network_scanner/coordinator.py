@@ -23,19 +23,19 @@ from .provider import opnsense, unifi, adguard
 
 _LOGGER = logging.getLogger(__name__)
 STORE_VERSION = 1
-STORE_KEY = f"{DOMAIN}_inventory"
+STALE_HOURS = 24  # mark devices stale after this many hours
 
 async def async_setup_coordinator(hass: HomeAssistant, entry: ConfigEntry) -> None:
     hass.data.setdefault(DOMAIN, {})
     coordinator = NetworkScannerCoordinator(hass, entry)
     hass.data[DOMAIN][entry.entry_id] = coordinator
-    await hass.config_entries.async_forward_entry_setups(entry, ["sensor"])
+    # DO NOT forward platforms here (done in __init__.py)
     hass.async_create_task(coordinator.async_request_refresh())
 
 async def async_unload_coordinator(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    ok = await hass.config_entries.async_unload_platforms(entry, ["sensor"])
+    # DO NOT unload platforms here (done in __init__.py)
     hass.data[DOMAIN].pop(entry.entry_id, None)
-    return ok
+    return True
 
 class NetworkScannerCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
@@ -52,7 +52,7 @@ class NetworkScannerCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             update_method=self._async_update_data, update_interval=update_interval,
         )
 
-        self._store: Store = Store(hass, STORE_VERSION, STORE_KEY)
+        self._store = Store(hass, STORE_VERSION, f"{DOMAIN}_inventory_{entry.entry_id}")
         self._inventory: Dict[str, Dict[str, Any]] | None = None  # key -> stored record
         
     def _build_views(self, merged: list[dict]) -> dict:
@@ -77,6 +77,9 @@ class NetworkScannerCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                 "role": role,
                 "vlan_id": vlan_id,
                 "type": d.get("device_type") or "unknown",
+                "site": d.get("site") or "",
+                "new": bool((d.get("derived") or {}).get("new_device")),
+                "risk": (d.get("derived") or {}).get("risk_score", 0),
                 "source_str": ",".join(d.get("sources", [])) if d.get("sources") else (d.get("source") or ""),
             })
     
@@ -110,29 +113,45 @@ class NetworkScannerCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
 
             # persist first_seen/last_seen + keep annotations
             changed = False
+            now = dt_util.utcnow()
+            
             for d in merged:
                 key = d["mac"] or (f"IP:{d['ips'][0]}" if d.get("ips") else None)
                 if not key:
                     continue
-                stored = self._inventory.get(key, {})
-                if "first_seen" not in stored:
-                    stored["first_seen"] = now_iso
-                    changed = True
-                stored["last_seen"] = now_iso
+            
+                prev = self._inventory.get(key, {})
+                was_known = bool(prev)
+                prev_last = dt_util.parse_datetime(prev.get("last_seen")) if prev.get("last_seen") else None
+            
+                deriv = d.setdefault("derived", {})
+                deriv["new_device"] = not was_known
+                deriv["stale"] = bool(prev_last and (now - prev_last) > timedelta(hours=STALE_HOURS))
+            
                 # carry forward user annotations if present
                 for k in ("owner", "room", "notes", "tags_user"):
-                    if k in stored and k not in d.get("derived", {}):
-                        d.setdefault("derived", {})[k] = stored[k]
-                # save back minimal record
-                self._inventory[key] = {
-                    "first_seen": stored["first_seen"],
-                    "last_seen": stored["last_seen"],
-                    # keep space for annotations
-                    **{k: stored.get(k) for k in ("owner","room","notes","tags_user") if stored.get(k) is not None},
+                    if k in prev and k not in deriv:
+                        deriv[k] = prev[k]
+            
+                # update store record
+                stored = {
+                    "first_seen": prev.get("first_seen") or now.isoformat(),
+                    "last_seen": now.isoformat(),
+                    **{k: prev.get(k) for k in ("owner", "room", "notes", "tags_user") if prev.get(k) is not None},
                 }
-
+                self._inventory[key] = stored
+                changed = True
+            
+                # surface timestamps on the device so HA can display them
+                d["first_seen"] = stored["first_seen"]
+                d["last_seen"]  = stored["last_seen"]
+            
+                # recompute risk AFTER flags are set
+                deriv["risk_score"] = self._risk_score(d)
+            
             if changed:
                 await self._store.async_save(self._inventory)
+
                 
             views = self._build_views(merged)
             
