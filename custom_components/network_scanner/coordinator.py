@@ -54,6 +54,46 @@ class NetworkScannerCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
 
         self._store: Store = Store(hass, STORE_VERSION, STORE_KEY)
         self._inventory: Dict[str, Dict[str, Any]] | None = None  # key -> stored record
+        
+    def _build_views(self, merged: list[dict]) -> dict:
+        flat = []
+        idx_mac: dict[str, int] = {}
+        idx_ip: dict[str, int] = {}
+        vendors: dict[str, int] = {}
+        vlans: dict[str, int] = {}
+    
+        for i, d in enumerate(merged):
+            ip = d.get("ip") or (d.get("ips", [None])[0] if d.get("ips") else None)
+            mac = (d.get("mac") or "").upper()
+            role = d.get("network_role") or ""
+            vlan_id = d.get("vlan_id")
+            v = d.get("vendor") or "Unknown"
+    
+            flat.append({
+                "hostname": d.get("hostname") or "",
+                "ip": ip or "",
+                "mac": mac,
+                "vendor": v,
+                "role": role,
+                "vlan_id": vlan_id,
+                "type": d.get("device_type") or "unknown",
+                "source_str": ",".join(d.get("sources", [])) if d.get("sources") else (d.get("source") or ""),
+            })
+    
+            if mac:
+                idx_mac[mac] = i
+            if ip:
+                idx_ip[ip] = i
+    
+            vendors[v] = vendors.get(v, 0) + 1
+            key_vlan = str(vlan_id) if vlan_id is not None else "None"
+            vlans[key_vlan] = vlans.get(key_vlan, 0) + 1
+    
+        return {
+            "flat": flat,
+            "index": {"mac": idx_mac, "ip": idx_ip},
+            "summary": {"vendors": vendors, "vlans": vlans},
+        }
 
     async def _ensure_inventory_loaded(self) -> None:
         if self._inventory is None:
@@ -93,8 +133,15 @@ class NetworkScannerCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
 
             if changed:
                 await self._store.async_save(self._inventory)
-
-            return {"devices": merged, "count": len(merged)}
+                
+            views = self._build_views(merged)
+            
+            return {
+                "devices": merged,
+                "count": len(merged),
+                "last_refresh_utc": now_iso,
+                **views,   # flat, index, summary
+}              
         except Exception as exc:
             raise UpdateFailed(str(exc)) from exc
 
