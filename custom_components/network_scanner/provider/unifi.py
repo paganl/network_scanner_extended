@@ -62,13 +62,48 @@ async def async_get_devices(
     return []
 
 def _parse(items: list) -> List[Dict[str, Any]]:
-    out=[]
-    for it in items:
+    devices: List[Dict[str, Any]] = []
+    for it in items or []:
         if not isinstance(it, dict):
             continue
-        mac=(it.get("mac") or "").upper()
-        ip = it.get("ip") or ""
+
+        mac = (it.get("mac") or "").upper()
+        ip = str(it.get("ip") or "")
         host = it.get("hostname") or it.get("name") or it.get("device_name") or ""
-        if mac or ip:
-            out.append({"mac": mac, "ip": ip, "hostname": host, "vendor": it.get("oui") or "", "source": "unifi"})
-    return out
+        oui  = it.get("oui") or ""
+
+        # Skip entries that have neither MAC nor IP
+        if not mac and not ip:
+            continue
+
+        # Provider-specific enrichment straight from UniFi payload
+        uni = {
+            "is_wired": bool(it.get("is_wired")),
+            "ap_mac": it.get("ap_mac") or "",
+            "bssid": it.get("bssid") or "",
+            "essid": it.get("essid") or it.get("ssid") or "",
+            "rssi": it.get("rssi"),
+            "rx_rate_mbps": it.get("rx_rate"),
+            "tx_rate_mbps": it.get("tx_rate"),
+            "oui": oui,
+            "uptime_s": it.get("uptime"),
+            "is_guest": bool(it.get("is_guest")),
+            "vlan": it.get("vlan"),
+            "site": it.get("site_name") or it.get("site") or it.get("site_id") or "default",
+            # Useful when the client is wired
+            "sw_mac": it.get("sw_mac") or "",
+            "sw_port": it.get("sw_port"),
+        }
+
+        device = {
+            "mac": mac,
+            "ip": ip,
+            "hostname": host,
+            "vendor": oui,          # top-level vendor = UniFi's OUI if present
+            "source": "unifi",
+            "unifi": uni,           # keep all UniFi specifics namespaced
+        }
+        devices.append(device)
+
+    return devices
+
