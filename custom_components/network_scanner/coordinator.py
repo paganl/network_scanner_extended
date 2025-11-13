@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import timedelta
-from typing import Any, Dict, List, Tuple, Set
+from typing import Any, Dict, List
 
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
@@ -162,7 +162,7 @@ class NetworkScannerCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                 "count": len(merged),
                 "last_refresh_utc": now_iso,
                 **views,   # flat, index, summary
-}              
+            }              
         except Exception as exc:
             raise UpdateFailed(str(exc)) from exc
 
@@ -231,7 +231,6 @@ class NetworkScannerCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
 
     def _merge_and_enrich(self, src: Dict[str, List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
         by_key: Dict[str, Dict[str, Any]] = {}
-        sources_seen: Dict[str, Set[str]] = {}
 
         def key_of(d: Dict[str, Any]) -> str | None:
             mac = (d.get("mac") or "").upper()
@@ -274,7 +273,12 @@ class NetworkScannerCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
 
             # quick device_type + interface from provider blocks
             if "unifi" in d:
-                cur["device_type"] = "wired" if d["unifi"].get("is_wired") else "wifi"
+                iw = d["unifi"].get("is_wired")
+                if iw is True:
+                    cur["device_type"] = "wired"
+                elif iw is False:
+                    cur["device_type"] = "wifi"
+                # else leave whatever it was (default "unknown")
                 cur["site"] = d["unifi"].get("site") or cur["site"]
             if "opnsense" in d:
                 cur["interface"] = d["opnsense"].get("intf") or cur["interface"]
@@ -290,7 +294,6 @@ class NetworkScannerCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             cur["tags"] = sorted(tags)
 
             by_key[k] = cur
-            sources_seen.setdefault(k, set()).add(source)
 
         # ingest all
         for src_name, items in (src or {}).items():
@@ -303,10 +306,7 @@ class NetworkScannerCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             vlan_id = self._derive_vlan_id(dev)
             dev["vlan_id"] = vlan_id
 
-            derived = dev.setdefault("derived", {})
-            derived["new_device"] = False  # will be set from store on next cycle
-            derived["stale"] = False
-            derived["risk_score"] = self._risk_score(dev)
+            dev.setdefault("derived", {})  # flags filled later after store merge
 
             out.append(dev)
 
@@ -318,8 +318,11 @@ class NetworkScannerCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
     def _derive_vlan_id(dev: Dict[str, Any]) -> int | None:
         # from UniFi if present
         uni = dev.get("unifi") or {}
-        if "vlan" in uni and isinstance(uni["vlan"], int):
-            return uni["vlan"]
+        if "vlan" in uni:
+            try:
+                return int(uni["vlan"])
+            except (TypeError, ValueError):
+                pass
         # parse from interface like 'vlan0.2'
         intf = dev.get("interface") or ""
         if ". " in intf:  # guard against typo
