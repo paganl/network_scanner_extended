@@ -1,13 +1,14 @@
 """Set up the Network Scanner integration.
 
 This module initialises the data coordinator and registers services
-when Home Assistant loads a config entry for the integration.  It
+when Home Assistant loads a config entry for the integration. It
 also handles unloading and reloading entries in response to option
-changes.  The logic here relies on the ``NetworkScannerCoordinator``
+changes. The logic here relies on the ``NetworkScannerCoordinator``
 defined in ``coordinator.py`` to perform periodic updates.
 """
 
 from __future__ import annotations
+
 import logging
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -26,11 +27,11 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     entry.async_on_unload(entry.add_update_listener(async_reload_entry))
     await async_setup_coordinator(hass, entry)
-    await hass.config_entries.async_forward_entry_setups(entry, [Platform.SENSOR])
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    ok = await await hass.config_entries.async_forward_entry_setups(entry, [Platform.SENSOR])
+    ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     ok = await async_unload_coordinator(hass, entry) and ok
     return ok
 
