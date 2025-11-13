@@ -274,7 +274,10 @@ class OPNsenseARPClient:
                         return devices
         # fallback: no usable rows found
         return []
-
+        
+    # NOTE: We normalise a provider-specific block under "opnsense" so the
+    # coordinator can compute derived fields (role, vlan, risk) without
+    # losing original fields like intf/intf_description/expiry.
     def _parse_list_of_dicts(self, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         devices: List[Dict[str, Any]] = []
         for row in rows:
@@ -287,19 +290,36 @@ class OPNsenseARPClient:
             mac = _get_first(row, ["mac", "macaddr", "lladdr", "ether", "hwaddr"])
             host = _get_first(row, ["hostname", "fqdn", "name"])
             manufacturer = _get_first(row, ["manufacturer", "vendor"])
-
+            
             mac_upper = (mac or "").upper()
             # skip incomplete or invalid entries
             if mac_upper in ("", "(INCOMPLETE)", "00:00:00:00:00:00", "*"):
                 continue
             if ip and mac_upper:
+                # Provider-specific enrichment block from raw row
+                op_block = {
+                    "intf": row.get("intf") or "",
+                    "intf_description": row.get("intf_description") or row.get("description") or "",
+                    "arp_type": row.get("type") or "",
+                    "arp_expired": bool(row.get("expired")) if "expired" in row else None,
+                    "arp_expires_s": row.get("expires"),
+                    "arp_permanent": bool(row.get("permanent")) if "permanent" in row else None,
+                }
+            
                 device = {
                     "mac": mac_upper,
                     "ip": ip,
                     "hostname": host or "",
-                    "vendor": manufacturer or "",
+                    "vendor": (manufacturer or ""),
                     "source": "opnsense",
+                    "opnsense": op_block,
                 }
+            
+                # If upstream already set vendor elsewhere and manufacturer is empty,
+                # this leaves existing vendor intact; otherwise use manufacturer.
+                if not device["vendor"] and manufacturer:
+                    device["vendor"] = manufacturer
+            
                 devices.append(device)
         return devices
 
@@ -317,6 +337,7 @@ class OPNsenseARPClient:
                     "hostname": "",
                     "vendor": "",
                     "source": "opnsense",
+                    "opnsense": {},  # no extra fields available in this shape
                 }
                 devices.append(device)
         return devices
