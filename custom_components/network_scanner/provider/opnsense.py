@@ -23,6 +23,12 @@ from aiohttp import ClientSession, ClientTimeout, BasicAuth
 
 _LOGGER = logging.getLogger(__name__)
 
+def _looks_like_html(content_type: str, body: str) -> bool:
+    ct = (content_type or "").lower()
+    if "text/html" in ct:
+        return True
+    t = body.lstrip().lower()
+    return t.startswith("<!doctype") or t.startswith("<html")
 
 def _get_first(d: Dict[str, Any], keys: List[str], default: str = "") -> str:
     """Return the first non‑empty value from ``d`` for any of ``keys``.
@@ -116,6 +122,9 @@ class OPNsenseARPClient:
                 ssl=self._ssl,
             ) as resp:
                 text = await resp.text()
+                if _looks_like_html(resp.headers.get("Content-Type"), text):
+                    _LOGGER.debug("OPNsense POST %s returned HTML (likely login page).", url)
+                    return None          
                 if resp.status >= 400:
                     _LOGGER.debug(
                         "OPNsense POST %s returned HTTP %s: %.256s",
@@ -125,7 +134,8 @@ class OPNsenseARPClient:
                     )
                     return None
                 try:
-                    return await resp.json()
+                    # Accept JSON even if the server sets a wrong Content-Type
+                    return await resp.json(content_type=None)
                 except Exception:
                     _LOGGER.debug(
                         "OPNsense POST %s returned non‑JSON: %.256s", url, text
@@ -153,6 +163,9 @@ class OPNsenseARPClient:
                 ssl=self._ssl,
             ) as resp:
                 text = await resp.text()
+                if _looks_like_html(resp.headers.get("Content-Type"), text):
+                    _LOGGER.debug("OPNsense GET %s returned HTML (likely login page).", url)
+                    return None
                 if resp.status >= 400:
                     _LOGGER.debug(
                         "OPNsense GET %s returned HTTP %s: %.256s",
@@ -162,7 +175,7 @@ class OPNsenseARPClient:
                     )
                     return None
                 try:
-                    return await resp.json()
+                    return await resp.json(content_type=None)
                 except Exception:
                     _LOGGER.debug(
                         "OPNsense GET %s returned non‑JSON: %.256s", url, text
