@@ -2,37 +2,44 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
-
 from homeassistant.components.sensor import SensorEntity
+from homeassistant.core import HomeAssistant
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.const import UnitOfNone
 
 from .const import DOMAIN
-from .coordinator import NetworkScannerCoordinator
 
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities):
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+    async_add_entities([NetworkScannerSensor(coordinator, entry)], update_before_add=True)
 
-async def async_setup_entry(hass, entry, async_add_entities) -> None:
-    """Set up the network scanner sensor from a config entry."""
-    coordinator: NetworkScannerCoordinator = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities([NetworkScannerDevicesSensor(coordinator)])
+class NetworkScannerSensor(CoordinatorEntity, SensorEntity):
+    _attr_icon = "mdi:devices"
 
-
-class NetworkScannerDevicesSensor(CoordinatorEntity[NetworkScannerCoordinator], SensorEntity):
-    """Sensor representing the count of network devices."""
-
-    def __init__(self, coordinator: NetworkScannerCoordinator) -> None:
+    def __init__(self, coordinator, entry: ConfigEntry) -> None:
         super().__init__(coordinator)
-        self._attr_name = "Network Scanner Devices"
-        self._attr_icon = "mdi:devices"
+        self._entry = entry
+        # Friendly name varies per entry (e.g. “Network Scanner (opnsense)”)
+        title = entry.title or "Network Scanner"
+        self._attr_name = f"{title} Devices"
+        # Stable unique_id so multiple entries can coexist
+        self._attr_unique_id = f"{entry.entry_id}_devices"
 
     @property
-    def native_value(self) -> int:
-        """Return the number of devices detected."""
-        data = self.coordinator.data or []
-        return len(data)
+    def native_value(self):
+        """Sensor state = device count."""
+        data = self.coordinator.data or {}
+        return int(data.get("count") or 0)
 
     @property
-    def extra_state_attributes(self) -> Dict[str, Any]:
-        """Return additional attributes with the raw device list."""
-        data: List[Dict[str, Any]] = self.coordinator.data or []
-        return {"devices": data}
+    def extra_state_attributes(self):
+        """
+        Expose all coordinator data (devices, flat, index, summary, last_refresh_utc, count).
+        These are plain dict/list/str/int types — safe for HA.
+        """
+        return self.coordinator.data or {}
+
+    @property
+    def should_poll(self) -> bool:
+        return False
