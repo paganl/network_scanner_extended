@@ -115,53 +115,100 @@ class NetworkScannerCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
 
             # persist first_seen/last_seen + keep annotations
             changed = False
-            now = dt_util.utcnow()
 
+            now = dt_util.utcnow()
+            now_ts = now.timestamp()
+            
             def _epoch_to_iso(v):
                 try:
                     return dt_util.utc_from_timestamp(float(v)).isoformat()
                 except Exception:
                     return None
             
+            def _best_seen_iso_for_device(dev: Dict[str, Any], prev_last_iso: str | None) -> str:
+                """
+                Choose the best last_seen time we can infer from provider signals.
+                Priority:
+                  1) UniFi 'last_seen' (epoch seconds)
+                  2) OPNsense ARP 'expires' (approximate: now - (TTL - expires))
+                  3) Previous stored last_seen (don’t regress)
+                  4) now() as a last resort
+                """
+                candidates_ts: list[float] = []
+            
+                # UniFi: prefer true 'last_seen' if provider supplies it
+                uni = dev.get("unifi") or {}
+                uni_last_seen = uni.get("last_seen_ts")  # <-- you'll add this in the UniFi provider (see step 2)
+                if isinstance(uni_last_seen, (int, float)) and uni_last_seen > 0:
+                    candidates_ts.append(float(uni_last_seen))
+            
+                # OPNsense: approximate from ARP 'expires' counter
+                op = dev.get("opnsense") or {}
+                exp = op.get("arp_expires_s")
+                perm = op.get("arp_permanent")
+                if isinstance(exp, (int, float)) and exp >= 0 and not perm:
+                    # If TTL is 1200 and expires==1190, we "saw" it ~10s ago.
+                    seen_ts = now_ts - max(0.0, float(ASSUMED_ARP_TTL_S) - float(exp))
+                    candidates_ts.append(seen_ts)
+            
+                # Previous store value, if present (avoid regressions)
+                if prev_last_iso:
+                    prev_dt = dt_util.parse_datetime(prev_last_iso)
+                    if prev_dt:
+                        candidates_ts.append(prev_dt.timestamp())
+            
+                # Fallback: we did see the device in this scan, so 'now'
+                if not candidates_ts:
+                    candidates_ts.append(now_ts)
+            
+                best_ts = max(candidates_ts)
+                return dt_util.utc_from_timestamp(best_ts).isoformat()
+
+            
             for d in merged:
                 key = d["mac"] or (f"IP:{d['ips'][0]}" if d.get("ips") else None)
                 if not key:
                     continue
-            
+                
                 prev = self._inventory.get(key, {})
                 was_known = bool(prev)
-                prev_last = dt_util.parse_datetime(prev.get("last_seen")) if prev.get("last_seen") else None
-            
+                prev_last_iso = prev.get("last_seen")
+                
                 deriv = d.setdefault("derived", {})
                 deriv["new_device"] = not was_known
-                deriv["stale"] = bool(prev_last and (now - prev_last) > timedelta(hours=STALE_HOURS))
-            
+                
+                # stale flag computed from stored last_seen (if any)
+                prev_last_dt = dt_util.parse_datetime(prev_last_iso) if prev_last_iso else None
+                deriv["stale"] = bool(prev_last_dt and (now - prev_last_dt) > timedelta(hours=STALE_HOURS))
+                
                 # carry forward user annotations if present
                 for k in ("owner", "room", "notes", "tags_user"):
                     if k in prev and k not in deriv:
                         deriv[k] = prev[k]
-                        
-                prov_times = [
-                    _epoch_to_iso((d.get("unifi") or {}).get("last_seen_ts")),
-                    # add more sources later if they provide actual times
-                ]
-                best_seen = next((t for t in prov_times if t), None) or now.isoformat()
-            
-                # update store record
+                
+                # Compute a per-device last_seen using provider hints (UniFi/OPNsense), avoiding regressions
+                best_seen_iso = _best_seen_iso_for_device(d, prev_last_iso)
+                
+                # Update store record (preserve earliest first_seen)
+                stored_first = prev.get("first_seen") or now.isoformat()
                 stored = {
-                    "first_seen": prev.get("first_seen") or now.isoformat(),
-                     "last_seen": max(prev.get("last_seen") or "", best_seen),
+                    "first_seen": stored_first if stored_first <= best_seen_iso else best_seen_iso,
+                    "last_seen": best_seen_iso,
                     **{k: prev.get(k) for k in ("owner", "room", "notes", "tags_user") if prev.get(k) is not None},
                 }
-                self._inventory[key] = stored
-                changed = True
-            
-                # surface timestamps on the device so HA can display them
+                
+                # Only flag store as changed if it actually changed
+                if stored != prev:
+                    self._inventory[key] = stored
+                    changed = True
+                
+                # Surface timestamps for UI/templates
                 d["first_seen"] = stored["first_seen"]
                 d["last_seen"]  = stored["last_seen"]
-            
+                
                 # recompute risk AFTER flags are set
                 deriv["risk_score"] = self._risk_score(d)
+
             
             if changed:
                 await self._store.async_save(self._inventory)
