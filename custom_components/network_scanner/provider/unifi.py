@@ -93,6 +93,8 @@ def _parse(items: list) -> List[Dict[str, Any]]:
             # Useful when the client is wired
             "sw_mac": it.get("sw_mac") or "",
             "sw_port": it.get("sw_port"),
+            "last_seen_ts": sta.get("last_seen"),
+            "first_seen_ts": sta.get("first_seen"),
         }
 
         device = {
