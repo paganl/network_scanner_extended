@@ -1,10 +1,10 @@
-# network_scanner_alerts.yaml
-# version: 0.14.2 (2025-11-14)
+# network_scanner_guardrail.yaml
+# version: 0.14.3 (2025-11-14)
 
 blueprint:
   name: Network Scanner — Alerts (Extended, Lean)
-  description: >
-    v0.14.2 — Alerts on NEW / HIGH-RISK / DISAPPEARED / STALE devices from the
+  description: >-
+    v0.14.3 — Alerts on NEW / HIGH-RISK / DISAPPEARED / STALE devices from the
     Network Scanner Extended (Lean) sensor. Supports change-only diffing against
     the previous refresh, cooldown, and rich include/ignore filters.
   domain: automation
@@ -16,98 +16,124 @@ blueprint:
     network_sensor:
       name: Network Scanner sensor
       description: Sensor with attributes: devices, flat, index, summary, last_refresh_utc
-      selector: { entity: { domain: sensor } }
+      selector:
+        entity:
+          domain: sensor
 
     # --- Alert toggles ---
     alert_new:
       name: Alert on NEW devices
       default: true
-      selector: { boolean: {} }
+      selector:
+        boolean: {}
 
     alert_high_risk:
       name: Alert on HIGH-RISK devices
       default: true
-      selector: { boolean: {} }
+      selector:
+        boolean: {}
 
     alert_disappeared:
       name: Alert on DISAPPEARED devices
       description: Devices present in previous refresh but missing now
       default: true
-      selector: { boolean: {} }
+      selector:
+        boolean: {}
 
     alert_stale:
       name: Alert on STALE devices
       description: Uses coordinator 'devices[].derived.stale' flag
       default: false
-      selector: { boolean: {} }
+      selector:
+        boolean: {}
 
     high_risk_threshold:
       name: High-risk threshold (>=)
       default: 60
-      selector: { number: { min: 0, max: 100, step: 5, mode: slider } }
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 5
+          mode: slider
 
     change_only:
       name: Only notify when a category CHANGES vs previous refresh
       default: true
-      selector: { boolean: {} }
+      selector:
+        boolean: {}
 
     cooldown_min:
       name: Cooldown (minutes) — suppress all alerts if last run was recent
       default: 0
-      selector: { number: { min: 0, max: 360, step: 1, mode: box } }
+      selector:
+        number:
+          min: 0
+          max: 360
+          step: 1
+          mode: box
 
     # --- Filters (all optional) ---
     ignore_macs:
       name: Ignore MACs (exact match, any case)
       default: []
-      selector: { object: {} }
+      selector:
+        object: {}
 
     include_vlans:
       name: Include ONLY these VLAN IDs (strings or numbers). Empty = all
       default: []
-      selector: { object: {} }
+      selector:
+        object: {}
 
     ignore_vlans:
       name: Ignore these VLAN IDs (strings or numbers)
       default: []
-      selector: { object: {} }
+      selector:
+        object: {}
 
     include_roles:
       name: Include ONLY these roles (case-insensitive; e.g., IoT, USER, Media). Empty = all
       default: []
-      selector: { object: {} }
+      selector:
+        object: {}
 
     ignore_roles:
       name: Ignore these roles (case-insensitive)
       default: []
-      selector: { object: {} }
+      selector:
+        object: {}
 
     ignore_vendor_substrings:
       name: Ignore Vendor contains (case-insensitive substrings)
       default: []
-      selector: { object: {} }
+      selector:
+        object: {}
 
     # --- Notifications ---
     notify_actions:
       name: Notification actions
-      description: >
+      description: >-
         Provide the action(s) that actually deliver the message.
         You may reference {{ ns_title }} and {{ ns_message }}.
-      selector: { action: {} }
+      selector:
+        action: {}
 
     blueprint_version:
       name: Blueprint version (do not change)
-      default: "0.9.0"
-      selector: { text: {} }
+      default: "0.14.3"
+      selector:
+        text: {}
 
 # -------------------- TRIGGER --------------------
 trigger:
-  - platform: template
-    value_template: "{{ state_attr(i_sensor, 'last_refresh_utc') }}"
+  - platform: state
+    entity_id: !input network_sensor
+    attribute: last_refresh_utc
 
 # -------------------- VARIABLES --------------------
 variables:
-  # bind inputs (never use !input inside templates)
+  # bind inputs (avoid !input inside Jinja)
   i_sensor: !input network_sensor
   i_alert_new: !input alert_new
   i_alert_high: !input alert_high_risk
@@ -116,14 +142,12 @@ variables:
   i_threshold: !input high_risk_threshold
   i_change_only: !input change_only
   i_cooldown: !input cooldown_min
-
   i_ignore_macs: !input ignore_macs
   i_include_vlans: !input include_vlans
   i_ignore_vlans: !input ignore_vlans
   i_include_roles: !input include_roles
   i_ignore_roles: !input ignore_roles
   i_ignore_vendor_sub: !input ignore_vendor_substrings
-
   i_version: !input blueprint_version
 
   # Helper normalisations
@@ -144,11 +168,9 @@ variables:
   cur_flat: "{{ state_attr(i_sensor, 'flat') or [] }}"
   cur_devices: "{{ state_attr(i_sensor, 'devices') or [] }}"
   prev_flat: >
-    {{ (trigger.from_state and trigger.from_state.attributes and
-        (trigger.from_state.attributes.flat or [])) or [] }}
+    {{ (trigger.from_state and trigger.from_state.attributes and (trigger.from_state.attributes.flat or [])) or [] }}
   prev_devices: >
-    {{ (trigger.from_state and trigger.from_state.attributes and
-        (trigger.from_state.attributes.devices or [])) or [] }}
+    {{ (trigger.from_state and trigger.from_state.attributes and (trigger.from_state.attributes.devices or [])) or [] }}
 
   # Filter pipeline over `flat`
   filtered_flat: >
@@ -158,25 +180,19 @@ variables:
       {% set vlanS = (d.vlan_id if d.vlan_id is not none else 'None') | string %}
       {% set roleL = (d.role or '')|lower %}
       {% set vendL = (d.vendor or '')|lower %}
-
       {% set ok = True %}
-
       {# MAC ignore #}
       {% if macU in _ignore_macs %}{% set ok = False %}{% endif %}
-
       {# VLAN include / ignore #}
       {% if _include_vlans|length > 0 and vlanS not in _include_vlans %}{% set ok = False %}{% endif %}
       {% if vlanS in _ignore_vlans %}{% set ok = False %}{% endif %}
-
       {# role include / ignore #}
       {% if _include_roles|length > 0 and roleL not in _include_roles %}{% set ok = False %}{% endif %}
       {% if roleL in _ignore_roles %}{% set ok = False %}{% endif %}
-
       {# vendor substring ignore #}
       {% for sub in _ignore_vendor_sub %}
         {% if sub and sub in vendL %}{% set ok = False %}{% endif %}
       {% endfor %}
-
       {% if ok %}
         {% set ns.lst = ns.lst + [d] %}
       {% endif %}
@@ -197,7 +213,6 @@ variables:
       {% set vlanS = (d.vlan_id if d.vlan_id is not none else 'None') | string %}
       {% set roleL = (d.role or '')|lower %}
       {% set vendL = (d.vendor or '')|lower %}
-
       {% set ok = True %}
       {% if macU in _ignore_macs %}{% set ok = False %}{% endif %}
       {% if _include_vlans|length > 0 and vlanS not in _include_vlans %}{% set ok = False %}{% endif %}
@@ -234,7 +249,7 @@ variables:
     {% endfor %}
     {{ ns.lst }}
 
-  # Stale = from 'devices' derived.stale == true (after same MAC filter etc.)
+  # Stale = from 'devices' derived.stale == true (after same filters)
   stale_list: >
     {% set ns = namespace(lst=[]) %}
     {% for d in (cur_devices or []) %}
@@ -252,7 +267,6 @@ variables:
         {% if sub and sub in vendL %}{% set skip = true %}{% endif %}
       {% endfor %}
       {% if skip %}{% continue %}{% endif %}
-
       {% if d.derived is defined and d.derived.stale is defined and d.derived.stale %}
         {% set entry = {
           'hostname': d.hostname or '',
@@ -271,11 +285,9 @@ variables:
 
   # Change detection for new/high-risk (mac sets)
   prev_new_macs: >
-    {{ (prev_filtered_flat | selectattr('new','eq', true)
-        | map(attribute='mac') | map('upper') | list) | unique | list }}
+    {{ (prev_filtered_flat | selectattr('new','eq', true) | map(attribute='mac') | map('upper') | list) | unique | list }}
   cur_new_macs: >
     {{ (cur_new | map(attribute='mac') | map('upper') | list) | unique | list }}
-
   prev_high_macs: >
     {{ (prev_high | map(attribute='mac') | map('upper') | list) | unique | list }}
   cur_high_macs: >
@@ -288,7 +300,7 @@ variables:
       {{ diff < (i_cooldown|int) }}
     {% else %}false{% endif %}
 
-  # defaults for titles/messages to avoid undefined warnings
+  # avoid undefined warnings
   ns_title: ""
   ns_message: ""
 
@@ -305,15 +317,12 @@ action:
       - conditions:
           - condition: template
             value_template: >
-              {{ i_alert_new and (
-                   (not i_change_only and (cur_new | length > 0)) or
-                   (i_change_only and (cur_new_macs != prev_new_macs))
-                 )
-              }}
+              {{ i_alert_new and ( (not i_change_only and (cur_new | length > 0))
+              or (i_change_only and (cur_new_macs != prev_new_macs)) ) }}
         sequence:
           - variables:
               ns_title: "NEW devices ({{ cur_new | length }}) — v{{ i_version }}"
-              ns_message: >
+              ns_message: >-
                 {% for d in cur_new -%}
                 • {{ (d.hostname or d.mac) | trim }} · `{{ d.ip or '—' }}` · VLAN {{ d.vlan_id if d.vlan_id is not none else '—' }} · {{ d.vendor or 'Unknown' }}
                 {% endfor %}
@@ -324,15 +333,12 @@ action:
       - conditions:
           - condition: template
             value_template: >
-              {{ i_alert_high and (
-                   (not i_change_only and (cur_high | length > 0)) or
-                   (i_change_only and (cur_high_macs != prev_high_macs))
-                 )
-              }}
+              {{ i_alert_high and ( (not i_change_only and (cur_high | length > 0))
+              or (i_change_only and (cur_high_macs != prev_high_macs)) ) }}
         sequence:
           - variables:
               ns_title: "HIGH-RISK ≥ {{ i_threshold }} ({{ cur_high | length }}) — v{{ i_version }}"
-              ns_message: >
+              ns_message: >-
                 {% for d in cur_high -%}
                 • {{ (d.hostname or d.mac) | trim }} · risk={{ d.risk }} · role={{ d.role or '—' }} · `{{ d.ip or '—' }}` · VLAN {{ d.vlan_id if d.vlan_id is not none else '—' }}
                 {% endfor %}
@@ -343,12 +349,11 @@ action:
       - conditions:
           - condition: template
             value_template: >
-              {{ i_alert_gone and (gone_list | length > 0) and
-                 ( (not i_change_only) or true ) }}
+              {{ i_alert_gone and (gone_list | length > 0) and ( (not i_change_only) or true ) }}
         sequence:
           - variables:
               ns_title: "DISAPPEARED devices ({{ gone_list | length }}) — v{{ i_version }}"
-              ns_message: >
+              ns_message: >-
                 {% for d in gone_list -%}
                 • {{ (d.hostname or d.mac) | trim }} · last IP `{{ d.ip or '—' }}` · VLAN {{ d.vlan_id if d.vlan_id is not none else '—' }} · {{ d.vendor or 'Unknown' }}
                 {% endfor %}
@@ -362,7 +367,7 @@ action:
         sequence:
           - variables:
               ns_title: "STALE devices ({{ stale_list | length }}) — v{{ i_version }}"
-              ns_message: >
+              ns_message: >-
                 {% for d in stale_list -%}
                 • {{ (d.hostname or d.mac) | trim }} · `{{ d.ip or '—' }}` · VLAN {{ d.vlan_id if d.vlan_id is not none else '—' }} · {{ d.vendor or 'Unknown' }}
                 {% endfor %}
