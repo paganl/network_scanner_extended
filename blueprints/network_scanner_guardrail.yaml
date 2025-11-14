@@ -1,20 +1,15 @@
 # network_scanner_alerts.yaml
-# version: 0.14.1 (2025-11-14)
+# version: 0.14.2 (2025-11-14)
 
 blueprint:
   name: Network Scanner – Alerts (Lean)
   description: >
-    v0.14.2 — Monitors your Network Scanner Extended (Lean) sensor for:
-      • new devices
-      • high-risk devices (risk ≥ threshold)
-    Lets you ignore MACs, tweak what counts as “safe” Wi-Fi roles,
-    and send notifications via your own action(s).
+    v0.14.2 — Alerts on new devices and high-risk devices from the
+    Network Scanner Extended (Lean) sensor. Lets you ignore MACs and
+    plug in your own notification action(s).
   domain: automation
-
-  # Point this to the RAW file in your GitHub repo (update before publishing).
   source_url: https://raw.githubusercontent.com/paganl/network_scanner_extended/refs/heads/main/blueprints/network_scanner_guardrail.yaml
   
-  # Optional: block installs on too-old Core versions
   homeassistant:
     min_version: 2024.10.0
 
@@ -22,128 +17,89 @@ blueprint:
     network_sensor:
       name: Network Scanner sensor
       description: Sensor with attributes 'flat' and 'last_refresh_utc'
-      selector:
-        entity:
-          domain: sensor
+      selector: { entity: { domain: sensor } }
 
     high_risk_threshold:
       name: High-risk threshold
       default: 60
-      selector:
-        number:
-          min: 0
-          max: 100
-          step: 5
-          mode: slider
+      selector: { number: { min: 0, max: 100, step: 5, mode: slider } }
 
     ignore_macs:
       name: Ignore MACs
       description: List of MACs to ignore (any case/format is fine)
       default: []
-      selector:
-        object:
-
-    allowed_wifi_roles:
-      name: Allowed Wi-Fi roles (treated as safe)
-      description: Devices with these roles won’t be flagged by role-based logic
-      default:
-        - iot
-        - guest
-        - media
-      selector:
-        select:
-          multiple: true
-          options:
-            - iot
-            - guest
-            - media
-            - user
-            - work
+      selector: { object: {} }
 
     notify_actions:
       name: Notification actions
       description: >
-        Action sequence that sends a message; you may reference {{ ns_title }} and {{ ns_message }}.
-        Example:
-          - service: notify.mobile_app_your_phone
-            data:
-              title: "{{ ns_title }}"
-              message: "{{ ns_message }}"
-      selector:
-        action:
+        Action sequence that sends a message; you may reference
+        {{ ns_title }} and {{ ns_message }} here.
+      selector: { action: {} }
 
     blueprint_version:
-      name: Blueprint version (don’t change)
-      default: "0.5.0"
-      selector:
-        text:
+      name: Blueprint version (do not change)
+      default: "0.5.1"
+      selector: { text: {} }
 
-# ────────────────────────────────────────────────────────────────────────────────
-# Triggers whenever the sensor refreshes (we watch the 'last_refresh_utc' attr)
-# ────────────────────────────────────────────────────────────────────────────────
+# Trigger when the coordinator stamps a new refresh time
 trigger:
   - platform: template
     value_template: "{{ state_attr(i_sensor, 'last_refresh_utc') }}"
 
-# ────────────────────────────────────────────────────────────────────────────────
-# Always prefer binding !input to variables first (never put !input inside {{ }})
-# ────────────────────────────────────────────────────────────────────────────────
+# Bind inputs to variables (never use !input inside {{ ... }})
 variables:
   i_sensor: !input network_sensor
   i_ignore: !input ignore_macs
-  i_allowed: !input allowed_wifi_roles
   i_threshold: !input high_risk_threshold
   i_version: !input blueprint_version
 
-  # Safe defaults for messages (avoid “undefined” warnings):
+  # Normalise ignore MACs to uppercase once
+  _ignore: >
+    {{ (i_ignore or []) | map('string') | map('upper') | list }}
+
+  # Pull and filter the 'flat' view from the sensor
+  flat: >
+    {{ (state_attr(i_sensor, 'flat') or [])
+       | rejectattr('mac','in', _ignore)
+       | list }}
+
+  # Precompute sets we’ll test in conditions
+  new_list: >
+    {{ flat | selectattr('new','eq', true) | list }}
+  high_risk_list: >
+    {{ flat | selectattr('risk','ge', i_threshold) | list }}
+
+  # Safe defaults to avoid “undefined” warnings
   ns_title: ""
   ns_message: ""
 
-# No global conditions; we evaluate inside actions
 condition: []
 
-# ────────────────────────────────────────────────────────────────────────────────
-# Action flow:
-#  1) Pull and filter 'flat' rows (ignore MACs)
-#  2) Build “new” and “high_risk” lists
-#  3) If either list has items, format ns_title/ns_message and run your actions
-# ────────────────────────────────────────────────────────────────────────────────
 action:
-  - variables:
-      _flat_raw: "{{ state_attr(i_sensor, 'flat') or [] }}"
-      _ignore: "{{ (i_ignore or []) | map('string') | map('upper') | list }}"
-      flat: >
-        {{ _flat_raw
-           | rejectattr('mac','in', _ignore)
-           | list }}
-
   - choose:
-      # New devices
+      # Branch A — New devices present
       - conditions:
           - condition: template
-            value_template: >
-              {{ (flat | selectattr('new','eq', true) | list) | length > 0 }}
+            value_template: "{{ new_list | length > 0 }}"
         sequence:
           - variables:
-              new: "{{ flat | selectattr('new','eq', true) | list }}"
-              ns_title: "New devices detected ({{ new | length }}) — v{{ i_version }}"
+              ns_title: "New devices detected ({{ new_list | length }}) — v{{ i_version }}"
               ns_message: >
-                {% for d in new -%}
+                {% for d in new_list -%}
                 • {{ d.hostname or d.mac }} · {{ d.ip or '—' }} · VLAN {{ d.vlan_id if d.vlan_id is not none else '—' }} · {{ d.vendor or 'Unknown' }}
                 {% endfor %}
           - sequence: !input notify_actions
 
-      # High-risk devices (risk ≥ threshold)
+      # Branch B — High-risk devices present
       - conditions:
           - condition: template
-            value_template: >
-              {{ (flat | selectattr('risk','ge', i_threshold) | list) | length > 0 }}
+            value_template: "{{ high_risk_list | length > 0 }}"
         sequence:
           - variables:
-              high_risk: "{{ flat | selectattr('risk','ge', i_threshold) | list }}"
-              ns_title: "High-risk devices ({{ high_risk | length }}) — v{{ i_version }}"
+              ns_title: "High-risk devices ({{ high_risk_list | length }}) — v{{ i_version }}"
               ns_message: >
-                {% for d in high_risk -%}
+                {% for d in high_risk_list -%}
                 • {{ d.hostname or d.mac }} · risk={{ d.risk }} · role={{ d.role or '—' }} · {{ d.ip or '—' }}
                 {% endfor %}
           - sequence: !input notify_actions
