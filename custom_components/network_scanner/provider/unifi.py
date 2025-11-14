@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+# custom_components/network_scanner/provider/unifi.py
 """
 UniFi provider for the Network Scanner integration.
 
@@ -16,7 +16,6 @@ Highlights:
 - Exposes unifi.last_seen_ts / first_seen_ts for the coordinator to compute last_seen.
 
 """
-
 from __future__ import annotations
 
 import logging
@@ -26,108 +25,200 @@ import aiohttp
 
 _LOGGER = logging.getLogger(__name__)
 
-# ------------------------- small utils -------------------------
 
 def _looks_like_html(content_type: Optional[str], body: str) -> bool:
     ct = (content_type or "").lower()
     if "text/html" in ct:
         return True
-    t = (body or "").lstrip().lower()
+    t = body.lstrip().lower()
     return t.startswith("<!doctype") or t.startswith("<html")
 
 
-def _pick(first: Any, *fallbacks: Any) -> Any:
-    """Return the first truthy value from arguments."""
-    if first:
-        return first
-    for f in fallbacks:
-        if f:
-            return f
-    return first
-
-
-def _norm_mac(v: Any) -> str:
-    return (str(v or "")).upper()
-
-
-# ------------------------- HTTP helpers -------------------------
-
-async def _login_if_needed(
-    session: aiohttp.ClientSession,
-    base: str,
-    headers: Dict[str, str],
-    verify_ssl: bool,
-    timeout: aiohttp.ClientTimeout,
-    username: str,
-    password: str,
-) -> Dict[str, str]:
-    """Try UniFi OS login first, then legacy. Returns (maybe updated) headers.
-    Leaves cookies inside the session object; many UniFi installs rely on that.
-    """
-    # Try UniFi OS login (UDM/UDR, Network App on 8443)
-    try:
-        async with session.post(
-            f"{base}/api/auth/login",
-            json={"username": username, "password": password},
-            headers=headers,
-            ssl=verify_ssl,
-            timeout=timeout,
-        ) as r:
-            if r.status == 200:
-                csrf = r.headers.get("X-CSRF-Token")
-                if csrf:
-                    headers["X-CSRF-Token"] = csrf
-                _LOGGER.debug("UniFi OS login OK, CSRF=%s", "yes" if csrf else "no")
-                return headers
-    except Exception as exc:
-        _LOGGER.debug("UniFi OS login failed: %s", exc)
-
-    # Try legacy login (pre-UniFi OS)
-    try:
-        async with session.post(
-            f"{base}/api/login",
-            json={"username": username, "password": password},
-            headers=headers,
-            ssl=verify_ssl,
-            timeout=timeout,
-        ) as r:
-            if r.status == 200:
-                _LOGGER.debug("Legacy UniFi login OK")
-                return headers
-    except Exception as exc:
-        _LOGGER.debug("Legacy UniFi login failed: %s", exc)
-
-    return headers
-
-
-async def _json_get(
+async def _post_json(
     session: aiohttp.ClientSession,
     url: str,
-    headers: Dict[str, str],
-    verify_ssl: bool,
+    *,
+    json: Optional[Dict[str, Any]] = None,
+    headers: Optional[Dict[str, str]] = None,
+    cookies: Optional[aiohttp.CookieJar] = None,
+    verify_ssl: bool = True,
     timeout: aiohttp.ClientTimeout,
-) -> Optional[Any]:
-    """GET JSON from URL, tolerant to wrong content-type, avoids HTML bodies."""
+) -> Optional[Dict[str, Any]]:
     try:
-        async with session.get(url, headers=headers, ssl=verify_ssl, timeout=timeout) as r:
-            text = await r.text()
-            if r.status != 200:
-                _LOGGER.debug("GET %s -> HTTP %s: %.200s", url, r.status, text)
+        async with session.post(
+            url,
+            json=json,
+            headers=headers,
+            cookies=cookies,
+            ssl=verify_ssl,
+            timeout=timeout,
+        ) as resp:
+            text = await resp.text()
+            if resp.status >= 400:
+                _LOGGER.debug("UniFi POST %s -> HTTP %s: %.256s", url, resp.status, text)
                 return None
-            if _looks_like_html(r.headers.get("Content-Type"), text):
-                _LOGGER.debug("GET %s -> HTML (likely auth portal); skipping", url)
+            if _looks_like_html(resp.headers.get("Content-Type"), text):
+                _LOGGER.debug("UniFi POST %s returned HTML (likely login).", url)
                 return None
             try:
-                return await r.json(content_type=None)
+                return await resp.json(content_type=None)
             except Exception:
-                _LOGGER.debug("GET %s -> non-JSON body: %.200s", url, text)
+                _LOGGER.debug("UniFi POST %s returned non-JSON: %.256s", url, text)
                 return None
     except Exception as exc:
-        _LOGGER.debug("GET %s raised %s", url, exc)
+        _LOGGER.debug("UniFi POST %s raised %s", url, exc)
         return None
 
 
-# ------------------------- public entrypoint -------------------------
+async def _get_json(
+    session: aiohttp.ClientSession,
+    url: str,
+    *,
+    headers: Optional[Dict[str, str]] = None,
+    cookies: Optional[aiohttp.CookieJar] = None,
+    verify_ssl: bool = True,
+    timeout: aiohttp.ClientTimeout,
+) -> Optional[Dict[str, Any] | List[Any]]:
+    try:
+        async with session.get(
+            url,
+            headers=headers,
+            cookies=cookies,
+            ssl=verify_ssl,
+            timeout=timeout,
+        ) as resp:
+            text = await resp.text()
+            if resp.status >= 400:
+                _LOGGER.debug("UniFi GET %s -> HTTP %s: %.256s", url, resp.status, text)
+                return None
+            if _looks_like_html(resp.headers.get("Content-Type"), text):
+                _LOGGER.debug("UniFi GET %s returned HTML (likely login).", url)
+                return None
+            try:
+                return await resp.json(content_type=None)
+            except Exception:
+                _LOGGER.debug("UniFi GET %s returned non-JSON: %.256s", url, text)
+                return None
+    except Exception as exc:
+        _LOGGER.debug("UniFi GET %s raised %s", url, exc)
+        return None
+
+
+async def _login_and_headers(
+    session: aiohttp.ClientSession,
+    base: str,
+    *,
+    username: str,
+    password: str,
+    token: str,
+    verify_ssl: bool,
+    timeout: aiohttp.ClientTimeout,
+) -> Dict[str, Any]:
+    """
+    Returns dict with 'headers' and optional 'cookies'.
+    Uses bearer token when provided; otherwise tries modern and legacy login endpoints.
+    """
+    headers: Dict[str, str] = {"Content-Type": "application/json"}
+    cookies = None
+
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+        return {"headers": headers, "cookies": cookies}
+
+    # Modern UniFi OS
+    data = await _post_json(
+        session,
+        f"{base}/api/auth/login",
+        json={"username": username, "password": password},
+        headers=headers,
+        cookies=None,
+        verify_ssl=verify_ssl,
+        timeout=timeout,
+    )
+    if data is not None:
+        # cookie jar was populated by aiohttp; capture a snapshot
+        cookies = None  # aiohttp manages cookies automatically on the session
+        return {"headers": headers, "cookies": cookies}
+
+    # Legacy (pre-UniFi OS)
+    data = await _post_json(
+        session,
+        f"{base}/api/login",
+        json={"username": username, "password": password},
+        headers=headers,
+        cookies=None,
+        verify_ssl=verify_ssl,
+        timeout=timeout,
+    )
+    if data is not None:
+        cookies = None
+        return {"headers": headers, "cookies": cookies}
+
+    _LOGGER.debug("UniFi login failed (both modern and legacy). Proceeding without cookies.")
+    return {"headers": headers, "cookies": cookies}
+
+
+def _extract_items(payload: Dict[str, Any] | List[Any]) -> List[Dict[str, Any]]:
+    """
+    UniFi may return either a bare list or an object with 'data'.
+    """
+    if isinstance(payload, list):
+        return [it for it in payload if isinstance(it, dict)]
+    if isinstance(payload, dict):
+        data = payload.get("data")
+        if isinstance(data, list):
+            return [it for it in data if isinstance(it, dict)]
+    return []
+
+
+def _parse(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Normalise UniFi client rows into integration device dicts.
+    """
+    devices: List[Dict[str, Any]] = []
+
+    for it in items:
+        mac = (it.get("mac") or "").upper()
+        ip = str(it.get("ip") or "")
+        host = it.get("hostname") or it.get("name") or it.get("device_name") or ""
+        oui = it.get("oui") or ""
+
+        # Must have at least one identifier
+        if not mac and not ip:
+            continue
+
+        uni_block: Dict[str, Any] = {
+            "is_wired": bool(it.get("is_wired")),
+            "ap_mac": it.get("ap_mac") or "",
+            "bssid": it.get("bssid") or "",
+            "essid": it.get("essid") or it.get("ssid") or "",
+            "rssi": it.get("rssi"),
+            "rx_rate_mbps": it.get("rx_rate"),
+            "tx_rate_mbps": it.get("tx_rate"),
+            "oui": oui,
+            "uptime_s": it.get("uptime"),
+            "is_guest": bool(it.get("is_guest")),
+            "vlan": it.get("vlan"),
+            "site": it.get("site_name") or it.get("site") or it.get("site_id") or "default",
+            "sw_mac": it.get("sw_mac") or "",
+            "sw_port": it.get("sw_port"),
+            # Feed coordinator timestamp logic:
+            "last_seen_ts": it.get("last_seen"),   # epoch seconds (int)
+            "first_seen_ts": it.get("first_seen"), # epoch seconds (int)
+        }
+
+        device: Dict[str, Any] = {
+            "mac": mac,
+            "ip": ip,
+            "hostname": host,
+            "vendor": oui,     # Use OUI as vendor hint
+            "source": "unifi",
+            "unifi": uni_block,
+        }
+        devices.append(device)
+
+    return devices
+
 
 async def async_get_devices(
     session: aiohttp.ClientSession,
@@ -138,88 +229,53 @@ async def async_get_devices(
     verify_ssl: bool = True,
     timeout_s: int = 5,
 ) -> List[Dict[str, Any]]:
-    """Return a list of normalised device dicts from UniFi Network."""
+    """
+    Fetch active UniFi clients using modern and legacy paths.
+    Returns a list of normalised device dicts, or [] on failure.
+    """
     if not base_url:
         return []
 
     base = base_url.rstrip("/")
     timeout = aiohttp.ClientTimeout(total=timeout_s)
-    headers: Dict[str, str] = {"Content-Type": "application/json"}
 
-    # If caller provided a Bearer token, include it
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
+    auth = await _login_and_headers(
+        session,
+        base,
+        username=username,
+        password=password,
+        token=token,
+        verify_ssl=verify_ssl,
+        timeout=timeout,
+    )
+    headers = auth["headers"]
+    cookies = auth["cookies"]
 
-    # Attempt to establish cookies/CSRF if no token
-    if not token and username and password:
-        headers = await _login_if_needed(
-            session, base, headers, verify_ssl, timeout, username, password
-        )
-
-    # Probe multiple endpoints (UniFi OS proxied + legacy), and multiple resources
-    # Order matters: we prefer /stat/sta (active), then /stat/user (known), then /list/clients (legacy).
-    candidate_paths = [
-        "/proxy/network/api/s/default/stat/sta",
+    # Probe most common paths, stop at first with rows
+    paths = [
         "/api/s/default/stat/sta",
-        "/proxy/network/api/s/default/stat/user",
-        "/api/s/default/stat/user",
-        "/proxy/network/api/s/default/list/clients",
+        "/proxy/network/api/s/default/stat/sta",
         "/api/s/default/list/clients",
+        "/proxy/network/api/s/default/list/clients",
     ]
 
-    # Fetch and merge by MAC across all endpoints we can read
-    by_mac: Dict[str, Dict[str, Any]] = {}
-    for path in candidate_paths:
-        data = await _json_get(session, f"{base}{path}", headers, verify_ssl, timeout)
+    for path in paths:
+        data = await _get_json(
+            session,
+            f"{base}{path}",
+            headers=headers,
+            cookies=cookies,
+            verify_ssl=verify_ssl,
+            timeout=timeout,
+        )
         if data is None:
             continue
 
-        items = data.get("data") if isinstance(data, dict) else data
-        if not isinstance(items, list):
-            continue
+        items = _extract_items(data)
+        rows = _parse(items)
+        if rows:
+            _LOGGER.debug("UniFi parsed %d clients from %s", len(rows), path)
+            return rows
 
-        for it in items:
-            _ingest_unifi_item(by_mac, it)
-
-    # Emit sorted list (stable for UI)
-    devices = list(by_mac.values())
-    devices.sort(key=lambda d: (d.get("hostname") or "", d.get("mac") or d.get("ip") or ""))
-    return devices
-
-
-# ------------------------- parsing & merge -------------------------
-
-def _ingest_unifi_item(by_mac: Dict[str, Dict[str, Any]], it: Dict[str, Any]) -> None:
-    """Merge one UniFi client record into the accumulator keyed by MAC."""
-    if not isinstance(it, dict):
-        return
-
-    mac = _norm_mac(it.get("mac"))
-    ip = str(_pick(it.get("ip"), it.get("last_ip"), ""))
-
-    # If we truly have neither MAC nor IP, skip.
-    if not mac and not ip:
-        return
-
-    host = _pick(it.get("hostname"), it.get("name"), it.get("device_name"), "")
-    vendor = _pick(it.get("oui"), it.get("manufacturer"), it.get("dev_vendor"), "")
-
-    # Prepare the provider-specific block (carry raw-ish signals)
-    uni_block: Dict[str, Any] = {
-        "is_wired": bool(it.get("is_wired")),
-        "ap_mac": it.get("ap_mac") or "",
-        "bssid": it.get("bssid") or "",
-        "essid": _pick(it.get("essid"), it.get("ssid"), ""),
-        "rssi": it.get("rssi"),
-        "rx_rate_mbps": it.get("rx_rate"),
-        "tx_rate_mbps": it.get("tx_rate"),
-        "oui": vendor,
-        "uptime_s": it.get("uptime"),
-        "is_guest": bool(it.get("is_guest")),
-        "vlan": it.get("vlan"),
-        "site": _pick(it.get("site_name"), it.get("site"), it.get("site_id"), "default"),
-        # Wired switch info if present:
-        "sw_mac": it.get("sw_mac") or "",
-        "sw_port": it.get("sw_port"),
-        # Time fields (epoch seconds):
-        "last_seen_ts":
+    _LOGGER.debug("UniFi returned no clients from known endpoints.")
+    return []
