@@ -15,7 +15,8 @@ blueprint:
   input:
     network_sensor:
       name: Network Scanner sensor
-      description: Sensor with attributes: devices, flat, index, summary, last_refresh_utc
+      description: >-
+        Sensor with attributes: devices, flat, index, summary, last_refresh_utc
       selector:
         entity:
           domain: sensor
