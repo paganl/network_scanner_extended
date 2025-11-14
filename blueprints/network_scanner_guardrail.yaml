@@ -1,311 +1,151 @@
+# network_scanner_alerts.yaml
+# version: 0.14.1 (2025-11-14)
+
 blueprint:
-  name: Network Scanner Guardrail — Multi-alert & Digest
+  name: Network Scanner – Alerts (Lean)
   description: >
-    Works with the Network Scanner sensor that exposes 'flat', 'devices',
-    and 'summary' attributes. Sends notifications for new devices, high-risk
-    devices, Wi-Fi role violations, AP/switch changes (UniFi), plus a daily
-    digest. Includes an ignore list (MACs). All features are toggleable.
+    v0.14.2 — Monitors your Network Scanner Extended (Lean) sensor for:
+      • new devices
+      • high-risk devices (risk ≥ threshold)
+    Lets you ignore MACs, tweak what counts as “safe” Wi-Fi roles,
+    and send notifications via your own action(s).
   domain: automation
-  source_url: https://example.local/blueprints/network_scanner_guardrail.yaml
+
+  # Point this to the RAW file in your GitHub repo (update before publishing).
+  source_url: https://raw.githubusercontent.com/paganl/network_scanner_extended/refs/heads/main/blueprints/network_scanner_guardrail.yaml
+  
+  # Optional: block installs on too-old Core versions
+  homeassistant:
+    min_version: 2024.10.0
 
   input:
     network_sensor:
       name: Network Scanner sensor
-      description: Sensor entity with 'flat', 'devices', 'summary' attributes
+      description: Sensor with attributes 'flat' and 'last_refresh_utc'
       selector:
         entity:
           domain: sensor
-    enable_new_device:
-      name: Alert – New device detected
-      default: true
-      selector: { boolean: {} }
-    enable_high_risk:
-      name: Alert – High-risk device present
-      default: true
-      selector: { boolean: {} }
+
     high_risk_threshold:
-      name: High-risk threshold (0–100)
-      description: Score at or above which a device triggers high-risk alert
-      default: 50
+      name: High-risk threshold
+      default: 60
       selector:
         number:
           min: 0
           max: 100
           step: 5
           mode: slider
-    enable_role_violation:
-      name: Alert – Wi-Fi device on disallowed role
-      default: true
-      selector: { boolean: {} }
-    allowed_wifi_roles:
-      name: Allowed Wi-Fi roles (comma-separated, lower-case)
-      description: e.g. "iot,guest,media,user"
-      default: "iot,guest,media"
-      selector: { text: {} }
-    enable_ap_switch_change:
-      name: Alert – AP/switch-port changed (UniFi)
-      default: true
-      selector: { boolean: {} }
-    enable_daily_digest:
-      name: Daily digest
-      default: true
-      selector: { boolean: {} }
-    digest_time:
-      name: Digest time
-      default: "08:00:00"
-      selector: { time: {} }
+
     ignore_macs:
-      name: Ignore MACs (comma-separated, UPPER-CASE)
-      description: Devices here won’t trigger alerts (e.g. "AA:BB:CC:DD:EE:FF,11:22:33:44:55:66")
-      default: "AA:BB:CC:DD:EE:FF"
-      selector: { text: {} }
+      name: Ignore MACs
+      description: List of MACs to ignore (any case/format is fine)
+      default: []
+      selector:
+        object:
+
+    allowed_wifi_roles:
+      name: Allowed Wi-Fi roles (treated as safe)
+      description: Devices with these roles won’t be flagged by role-based logic
+      default:
+        - iot
+        - guest
+        - media
+      selector:
+        select:
+          multiple: true
+          options:
+            - iot
+            - guest
+            - media
+            - user
+            - work
 
     notify_actions:
-      name: Notify actions (what to do with ns_title/ns_message)
+      name: Notification actions
       description: >
-        Define one or more actions that use the variables 'ns_title' and
-        'ns_message'. Example below sends a mobile push AND a persistent
-        notification. You can customise to your own notify.* service.
-      default:
-        - service: persistent_notification.create
-          data:
-            title: "{{ ns_title | default('Network Scanner')  }}"
-            message: "{{ ns_message | default('Missing message') }}"
+        Action sequence that sends a message; you may reference {{ ns_title }} and {{ ns_message }}.
+        Example:
+          - service: notify.mobile_app_your_phone
+            data:
+              title: "{{ ns_title }}"
+              message: "{{ ns_message }}"
       selector:
-        action: {}
+        action:
 
-mode: parallel
-max: 10
+    blueprint_version:
+      name: Blueprint version (don’t change)
+      default: "0.5.0"
+      selector:
+        text:
 
+# ────────────────────────────────────────────────────────────────────────────────
+# Triggers whenever the sensor refreshes (we watch the 'last_refresh_utc' attr)
+# ────────────────────────────────────────────────────────────────────────────────
+trigger:
+  - platform: template
+    value_template: "{{ state_attr(i_sensor, 'last_refresh_utc') }}"
+
+# ────────────────────────────────────────────────────────────────────────────────
+# Always prefer binding !input to variables first (never put !input inside {{ }})
+# ────────────────────────────────────────────────────────────────────────────────
 variables:
   i_sensor: !input network_sensor
   i_ignore: !input ignore_macs
   i_allowed: !input allowed_wifi_roles
   i_threshold: !input high_risk_threshold
+  i_version: !input blueprint_version
 
+  # Safe defaults for messages (avoid “undefined” warnings):
   ns_title: ""
   ns_message: ""
 
-  ns_flat: "{{ state_attr(i_sensor, 'flat') or [] }}"
-  ns_devices: "{{ state_attr(i_sensor, 'devices') or [] }}"
-  ns_summary: "{{ state_attr(i_sensor, 'summary') or {} }}"
-  ns_vendors: "{{ ns_summary.get('vendors', {}) }}"
-  ns_vlans: "{{ ns_summary.get('vlans', {}) }}"
-  ns_ignore: >-
-    {{ (i_ignore|upper).replace(' ','').split(',') if i_ignore else [] }}
-  ns_allowed_roles: >-
-    {{ (i_allowed|lower).replace(' ','').split(',') if i_allowed else ['iot','guest','media'] }}
-
-trigger:
-  - platform: state
-    entity_id: !input network_sensor
-    id: scan_update
-  - platform: time
-    at: !input digest_time
-    id: daily_digest
-
+# No global conditions; we evaluate inside actions
 condition: []
 
+# ────────────────────────────────────────────────────────────────────────────────
+# Action flow:
+#  1) Pull and filter 'flat' rows (ignore MACs)
+#  2) Build “new” and “high_risk” lists
+#  3) If either list has items, format ns_title/ns_message and run your actions
+# ────────────────────────────────────────────────────────────────────────────────
 action:
+  - variables:
+      _flat_raw: "{{ state_attr(i_sensor, 'flat') or [] }}"
+      _ignore: "{{ (i_ignore or []) | map('string') | map('upper') | list }}"
+      flat: >
+        {{ _flat_raw
+           | rejectattr('mac','in', _ignore)
+           | list }}
+
   - choose:
-
-      # ============= DAILY DIGEST BRANCH =============
+      # New devices
       - conditions:
-          - condition: trigger
-            id: daily_digest
           - condition: template
-            value_template: "{{ !input enable_daily_digest }}"
+            value_template: >
+              {{ (flat | selectattr('new','eq', true) | list) | length > 0 }}
         sequence:
           - variables:
-              ns_title: "Network Scanner – Daily digest"
-              _since: "{{ (now() - timedelta(hours=24)).isoformat() }}"
-              _recent: >-
-                {% set out = [] %}
-                {% for d in ns_flat %}
-                  {% if d.first_seen and d.first_seen >= _since %}
-                    {% set _ = out.append(d) %}
-                  {% endif %}
+              new: "{{ flat | selectattr('new','eq', true) | list }}"
+              ns_title: "New devices detected ({{ new | length }}) — v{{ i_version }}"
+              ns_message: >
+                {% for d in new -%}
+                • {{ d.hostname or d.mac }} · {{ d.ip or '—' }} · VLAN {{ d.vlan_id if d.vlan_id is not none else '—' }} · {{ d.vendor or 'Unknown' }}
                 {% endfor %}
-                {{ out | sort(attribute='first_seen') | list }}
-              _unknown_vendor: "{{ ns_flat | selectattr('vendor','equalto','Unknown') | list }}"
-              ns_message: >-
-                Devices: {{ states(i_sensor) or '—' }}, New in 24h: {{ _recent|length }}
-                Vendors top 5:
-                {%- for k,v in (ns_vendors|dictsort(true, by='value'))[:5] -%}
-                  {{ ' ' if not loop.first else ' ' }}{{k}}={{v}}{{ ',' if not loop.last else '' }}
-                {%- endfor %}
-                {{ '\n' }}VLANs:
-                {%- for k,v in ns_vlans|dictsort -%}
-                  {{ ' ' if not loop.first else ' ' }}{{k}}={{v}}{{ ',' if not loop.last else '' }}
-                {%- endfor %}
+          - sequence: !input notify_actions
 
-                {%- if _recent|length > 0 -%}
-                {{ '\n\n' }}Recent first-seen:
-                {%- for d in _recent %}
-                {{ '\n' }}• {{ d.hostname or 'Unknown' }} ({{ d.mac }}), IP {{ d.ip or '—' }}, Vendor {{ d.vendor or 'Unknown' }}, Role {{ d.role or '—' }}, VLAN {{ d.vlan_id if d.vlan_id is not none else '—' }}, Risk {{ d.risk }}
-                {%- endfor -%}
-                {%- endif -%}
-
-                {%- if _unknown_vendor|length > 0 -%}
-                {{ '\n\n' }}Unknown vendors ({{ _unknown_vendor|length }}): e.g.
-                {%- for d in _unknown_vendor[:5] %}
-                {{ '\n' }}• {{ d.hostname or 'Unknown' }} ({{ d.mac }}) on {{ d.ip or '—' }}
-                {%- endfor -%}
-                {%- endif -%}
-          - choose:
-              - conditions: []
-                sequence: !input notify_actions
-
-      # ============= STATE UPDATE BRANCHES =============
+      # High-risk devices (risk ≥ threshold)
       - conditions:
-          - condition: trigger
-            id: scan_update
+          - condition: template
+            value_template: >
+              {{ (flat | selectattr('risk','ge', i_threshold) | list) | length > 0 }}
         sequence:
           - variables:
-              ns_title: ""
-              ns_message: ""
-
-              # Lists used by multiple branches
-              _new_devs: >-
-                {{ ns_flat
-                   | selectattr('new','equalto',True)
-                   | rejectattr('mac','in',ns_ignore)
-                   | list }}
-              _risky: >-
-                {{ ns_flat
-                   | selectattr('risk','ge', i_threshold|int(50))
-                   | rejectattr('mac','in', ns_ignore)
-                   | list }}
-              _offenders: >-
-                {% set out = [] %}
-                {% for d in ns_flat %}
-                  {% set role = (d.role or '')|lower %}
-                  {% if d.type == 'wifi'
-                        and (role not in ns_allowed_roles)
-                        and (d.mac not in ns_ignore) %}
-                    {% set _ = out.append(d) %}
-                  {% endif %}
+              high_risk: "{{ flat | selectattr('risk','ge', i_threshold) | list }}"
+              ns_title: "High-risk devices ({{ high_risk | length }}) — v{{ i_version }}"
+              ns_message: >
+                {% for d in high_risk -%}
+                • {{ d.hostname or d.mac }} · risk={{ d.risk }} · role={{ d.role or '—' }} · {{ d.ip or '—' }}
                 {% endfor %}
-                {{ out }}
+          - sequence: !input notify_actions
 
-              # AP/Switch change detection (UniFi)
-              _before: "{{ trigger.from_state.attributes.devices if trigger.from_state else [] }}"
-              _after: "{{ trigger.to_state.attributes.devices if trigger.to_state else [] }}"
-              _idx_before: >-
-                {% set m = dict() %}
-                {% for d in _before %}
-                  {% if d.mac %}{% set _ = m.update({ d.mac: d.get('unifi',{}) }) %}{% endif %}
-                {% endfor %}
-                {{ m }}
-              _idx_after: >-
-                {% set m = dict() %}
-                {% for d in _after %}
-                  {% if d.mac %}{% set _ = m.update({ d.mac: d.get('unifi',{}) }) %}{% endif %}
-                {% endfor %}
-                {{ m }}
-              _changed_macs: >-
-                {% set out = [] %}
-                {% for mac, u_after in _idx_after.items() %}
-                  {% if mac in ns_ignore %}{% continue %}{% endif %}
-                  {% set u_before = _idx_before.get(mac, {}) %}
-                  {% set ap_b = (u_before.ap_mac or '') %}
-                  {% set ap_a = (u_after.ap_mac or '') %}
-                  {% set sw_b = (u_before.sw_mac or '') ~ ':' ~ (u_before.sw_port if u_before.sw_port is not none else '') %}
-                  {% set sw_a = (u_after.sw_mac or '') ~ ':' ~ (u_after.sw_port if u_after.sw_port is not none else '') %}
-                  {% if ap_b != ap_a or sw_b != sw_a %}
-                    {% set _ = out.append(mac) %}
-                  {% endif %}
-                {% endfor %}
-                {{ out }}
-              _by_mac: >-
-                {% set m = dict() %}
-                {% for d in _after %}
-                  {% set _ = m.update({ d.mac: d }) %}
-                {% endfor %}
-                {{ m }}
-
-          # --- New device ---
-          - choose:
-              - conditions:
-                  - condition: template
-                    value_template: "{{ !input enable_new_device }}"
-                  - condition: template
-                    value_template: "{{ _new_devs | length > 0 }}"
-                sequence:
-                  - variables:
-                      ns_title: "Network Scanner – New device{{ '' if _new_devs|length==1 else 's' }}"
-                      ns_message: >-
-                        {%- for d in _new_devs -%}
-                        • {{ d.hostname or 'Unknown' }} ({{ d.mac }})
-                          IP: {{ d.ip or '—' }}, Vendor: {{ d.vendor or 'Unknown' }},
-                          Role: {{ d.role or '—' }}, VLAN: {{ d.vlan_id if d.vlan_id is not none else '—' }},
-                          Type: {{ d.type }}, Risk: {{ d.risk }}
-                        {%- if not loop.last %}{{ '\n' }}{% endif -%}
-                        {%- endfor -%}
-                  - choose:
-                      - conditions: []
-                        sequence: !input notify_actions
-
-          # --- High risk ---
-          - choose:
-              - conditions:
-                  - condition: template
-                    value_template: "{{ !input enable_high_risk }}"
-                  - condition: template
-                    value_template: "{{ _risky | length > 0 }}"
-                sequence:
-                  - variables:
-                      ns_title: "Network Scanner – High-risk device{{ '' if _risky|length==1 else 's' }}"
-                      ns_message: >-
-                        Threshold: {{ i_threshold }}
-                        {%- for d in _risky -%}
-                        {{ '\n' }}• {{ d.hostname or 'Unknown' }} ({{ d.mac }})
-                          IP: {{ d.ip or '—' }}, Vendor: {{ d.vendor or 'Unknown' }},
-                          Role: {{ d.role or '—' }}, VLAN: {{ d.vlan_id if d.vlan_id is not none else '—' }},
-                          Type: {{ d.type }}, Risk: {{ d.risk }}
-                        {%- endfor -%}
-                  - choose:
-                      - conditions: []
-                        sequence: !input notify_actions
-
-          # --- Wi-Fi role violation ---
-          - choose:
-              - conditions:
-                  - condition: template
-                    value_template: "{{ !input enable_role_violation }}"
-                  - condition: template
-                    value_template: "{{ _offenders | length > 0 }}"
-                sequence:
-                  - variables:
-                      ns_title: "Network Scanner – Wi-Fi on disallowed role"
-                      ns_message: >-
-                        Allowed roles: {{ ns_allowed_roles | join(', ') }}
-                        {%- for d in _offenders -%}
-                        {{ '\n' }}• {{ d.hostname or 'Unknown' }} ({{ d.mac }}) on role '{{ d.role or '—' }}'
-                          IP: {{ d.ip or '—' }}, VLAN: {{ d.vlan_id if d.vlan_id is not none else '—' }}, Risk: {{ d.risk }}
-                        {%- endfor -%}
-                  - choose:
-                      - conditions: []
-                        sequence: !input notify_actions
-
-          # --- AP / switch change (UniFi) ---
-          - choose:
-              - conditions:
-                  - condition: template
-                    value_template: "{{ !input enable_ap_switch_change }}"
-                  - condition: template
-                    value_template: "{{ _changed_macs | length > 0 }}"
-                sequence:
-                  - variables:
-                      ns_title: "Network Scanner – AP / switch change"
-                      ns_message: >-
-                        {%- for mac in _changed_macs -%}
-                        {%- set d = _by_mac.get(mac) -%}
-                        {%- set u = d.get('unifi',{}) if d else {} -%}
-                        • {{ (d.hostname if d else '') or 'Unknown' }} ({{ mac }})
-                          AP: {{ u.ap_mac or '—' }}, Switch: {{ u.sw_mac or '—' }}, Port: {{ u.sw_port if u.sw_port is not none else '—' }}
-                        {%- if not loop.last %}{{ '\n' }}{% endif -%}
-                        {%- endfor -%}
-                  - choose:
-                      - conditions: []
-                        sequence: !input notify_actions
+mode: restart
