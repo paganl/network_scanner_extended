@@ -116,6 +116,12 @@ class NetworkScannerCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             # persist first_seen/last_seen + keep annotations
             changed = False
             now = dt_util.utcnow()
+
+            def _epoch_to_iso(v):
+                try:
+                    return dt_util.utc_from_timestamp(float(v)).isoformat()
+                except Exception:
+                    return None
             
             for d in merged:
                 key = d["mac"] or (f"IP:{d['ips'][0]}" if d.get("ips") else None)
@@ -134,11 +140,17 @@ class NetworkScannerCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                 for k in ("owner", "room", "notes", "tags_user"):
                     if k in prev and k not in deriv:
                         deriv[k] = prev[k]
+                        
+                prov_times = [
+                    _epoch_to_iso((d.get("unifi") or {}).get("last_seen_ts")),
+                    # add more sources later if they provide actual times
+                ]
+                best_seen = next((t for t in prov_times if t), None) or now.isoformat()
             
                 # update store record
                 stored = {
                     "first_seen": prev.get("first_seen") or now.isoformat(),
-                    "last_seen": now.isoformat(),
+                     "last_seen": max(prev.get("last_seen") or "", best_seen),
                     **{k: prev.get(k) for k in ("owner", "room", "notes", "tags_user") if prev.get(k) is not None},
                 }
                 self._inventory[key] = stored
