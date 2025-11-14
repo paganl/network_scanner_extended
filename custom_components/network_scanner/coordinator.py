@@ -124,6 +124,12 @@ class NetworkScannerCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                     return dt_util.utc_from_timestamp(float(v)).isoformat()
                 except Exception:
                     return None
+
+            def _parse_iso(dt_str: str | None):
+                try:
+                    return dt_util.parse_datetime(dt_str) if dt_str else None
+                except Exception:
+                    return None
             
             def _best_seen_iso_for_device(dev: Dict[str, Any], prev_last_iso: str | None) -> str:
                 """
@@ -169,43 +175,58 @@ class NetworkScannerCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                 key = d["mac"] or (f"IP:{d['ips'][0]}" if d.get("ips") else None)
                 if not key:
                     continue
-                
+            
                 prev = self._inventory.get(key, {})
                 was_known = bool(prev)
-                prev_last_iso = prev.get("last_seen")
-                
+                prev_last_dt = _parse_iso(prev.get("last_seen"))
+            
                 deriv = d.setdefault("derived", {})
                 deriv["new_device"] = not was_known
-                
-                # stale flag computed from stored last_seen (if any)
-                prev_last_dt = dt_util.parse_datetime(prev_last_iso) if prev_last_iso else None
                 deriv["stale"] = bool(prev_last_dt and (now - prev_last_dt) > timedelta(hours=STALE_HOURS))
-                
+            
                 # carry forward user annotations if present
                 for k in ("owner", "room", "notes", "tags_user"):
                     if k in prev and k not in deriv:
                         deriv[k] = prev[k]
-                
-                # Compute a per-device last_seen using provider hints (UniFi/OPNsense), avoiding regressions
-                best_seen_iso = _best_seen_iso_for_device(d, prev_last_iso)
-                
-                # Update store record (preserve earliest first_seen)
-                stored_first = prev.get("first_seen") or now.isoformat()
+            
+                # --- build a "best_seen" by source ---
+                # UniFi: if you can add last_seen_ts in provider, prefer it
+                uni = d.get("unifi") or {}
+                best_seen_iso = _epoch_to_iso(uni.get("last_seen_ts"))  # may be None
+            
+                # OPNsense: if the ARP entry is present and not expired/permanent -> seen now
+                opn = d.get("opnsense") or {}
+                if not best_seen_iso:
+                    if opn.get("arp_permanent") is True:
+                        best_seen_iso = now.isoformat()
+                    elif opn.get("arp_expired") is False:
+                        best_seen_iso = now.isoformat()
+            
+                # Fallback: if device is present this cycle, we can treat as seen now
+                if not best_seen_iso:
+                    best_seen_iso = now.isoformat()
+            
+                # choose the newer of previous vs current (compare as datetimes)
+                best_seen_dt = _parse_iso(best_seen_iso)
+                if prev_last_dt and best_seen_dt and prev_last_dt > best_seen_dt:
+                    final_last_seen_iso = prev.get("last_seen")
+                else:
+                    final_last_seen_iso = best_seen_iso
+            
                 stored = {
-                    "first_seen": stored_first if stored_first <= best_seen_iso else best_seen_iso,
-                    "last_seen": best_seen_iso,
+                    "first_seen": prev.get("first_seen") or now.isoformat(),
+                    "last_seen": final_last_seen_iso,
                     **{k: prev.get(k) for k in ("owner", "room", "notes", "tags_user") if prev.get(k) is not None},
                 }
-                
-                # Only flag store as changed if it actually changed
+            
                 if stored != prev:
                     self._inventory[key] = stored
                     changed = True
-                
+            
                 # Surface timestamps for UI/templates
                 d["first_seen"] = stored["first_seen"]
                 d["last_seen"]  = stored["last_seen"]
-                
+            
                 # recompute risk AFTER flags are set
                 deriv["risk_score"] = self._risk_score(d)
 
@@ -375,21 +396,20 @@ class NetworkScannerCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
 
     @staticmethod
     def _derive_vlan_id(dev: Dict[str, Any]) -> int | None:
-        # from UniFi if present
+        # Prefer UniFi VLAN if present
         uni = dev.get("unifi") or {}
-        if "vlan" in uni:
-            try:
+        try:
+            if "vlan" in uni and uni["vlan"] is not None:
                 return int(uni["vlan"])
-            except (TypeError, ValueError):
-                pass
-        # parse from interface like 'vlan0.2'
-        intf = dev.get("interface") or ""
-        if ". " in intf:  # guard against typo
-            intf = intf.replace(". ", ".")
-        if "vlan" in intf and "." in intf:
+        except (TypeError, ValueError):
+            pass
+    
+        # Fallback: parse from interface like 'vlan0.2'
+        intf = (dev.get("interface") or "").replace(". ", ".")
+        if intf.startswith("vlan") and "." in intf:
             try:
                 return int(intf.split(".")[-1])
-            except Exception:
+            except (TypeError, ValueError):
                 return None
         return None
 
