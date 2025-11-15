@@ -1,41 +1,36 @@
 # custom_components/network_scanner/const.py
-from __future__ import annotations
 
-DOMAIN = "network_scanner"
+DEFAULT_SCAN_INTERVAL_MINUTES = 5
+DEFAULT_IP_RANGE = "10.0.0.0/24"
 
-# Provider selection
-CONF_PROVIDER = "provider"
-PROVIDER_OPNSENSE = "opnsense"
-PROVIDER_UNIFI = "unifi"
-PROVIDER_ADGUARD = "adguard"
-PROVIDER_OPNSENSE_UNIFI = "opnsense_unifi"
+CONF_ARP_PROVIDER   = "arp_provider"
+ARP_PROVIDER_NONE   = "none"
+ARP_PROVIDER_OPNSENSE = "opnsense"
+ARP_PROVIDER_ADGUARD  = "adguard"
 
-# Per-provider URLs
-CONF_OPNSENSE_URL = "opnsense_url"
-CONF_UNIFI_URL = "unifi_url"
-CONF_ADGUARD_URL = "adguard_url"
+CONF_ARP_VERIFY_TLS = "arp_verify_tls"
 
-# Auth + creds
-CONF_AUTH_MODE = "auth_mode"        # how we authenticate to UniFi
-AUTH_MODE_PASSWORD = "password"     # preferred name
-AUTH_MODE_TOKEN = "token"
+# Status & phase (for UI)
+STATUS_IDLE = "idle"
+STATUS_SCANNING = "scanning"
+STATUS_ENRICHING = "enriching"
+STATUS_OK = "ok"
+STATUS_ERROR = "error"
 
-# ---- Backward-compat shims (legacy names some flows still import) ----
-AUTH_MODE_USERPASS = AUTH_MODE_PASSWORD   # legacy alias -> keep imports working
+PHASE_IDLE = "idle"
+PHASE_ARP = "arp"
 
-# Credentials/keys
-CONF_KEY = "key"            # OPNsense API key
-CONF_SECRET = "secret"      # OPNsense API secret
-CONF_NAME = "username"      # UniFi / AdGuard username
-CONF_PASSWORD = "password"  # UniFi / AdGuard password
-CONF_TOKEN = "token"        # UniFi API token
+# Dispatcher signal
+SIGNAL_NSX_UPDATED = "nsx_updated"
 
-# Common options
-CONF_VERIFY_SSL = "verify_ssl"
-CONF_INTERVAL_MIN = "interval_minutes"
+# AdGuard
+CONF_ADG_URL  = "adguard_url"
+CONF_ADG_USER = "adguard_user"
+CONF_ADG_PASS = "adguard_pass"
 
-DEFAULT_OPTIONS = {
-    CONF_PROVIDER: PROVIDER_OPNSENSE,
-    CONF_VERIFY_SSL: False,
-    CONF_INTERVAL_MIN: 3,
-}
+# UniFi
+CONF_UNIFI_ENABLED = "unifi_enabled"
+CONF_UNIFI_URL  = "unifi_url"
+CONF_UNIFI_USER = "unifi_user"
+CONF_UNIFI_PASS = "unifi_pass"
+CONF_UNIFI_SITE = "unifi_site"
