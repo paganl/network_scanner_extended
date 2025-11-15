@@ -1,13 +1,13 @@
+"""Data controller for the Network Scanner integration (nmap-free)."""
+
 from __future__ import annotations
 from typing import Any, Dict, List, Optional, Tuple
-import asyncio
 import json
 import logging
 import re
 from datetime import datetime, timezone
 from ipaddress import ip_network, ip_address
 
-import nmap
 from aiohttp import ClientError, ClientTimeout, BasicAuth
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
@@ -15,7 +15,6 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
 from .const import (
-    DEFAULT_NMAP_ARGS,
     DEFAULT_SCAN_INTERVAL_MINUTES,
     DEFAULT_IP_RANGE,
     CONF_ARP_PROVIDER,
@@ -25,7 +24,7 @@ from .const import (
     CONF_ARP_VERIFY_TLS,
     # status/phase + signal
     STATUS_IDLE, STATUS_SCANNING, STATUS_ENRICHING, STATUS_OK, STATUS_ERROR,
-    PHASE_IDLE, PHASE_ARP, PHASE_NMAP,
+    PHASE_IDLE, PHASE_ARP,
     SIGNAL_NSX_UPDATED,
     # AdGuard
     CONF_ADG_URL, CONF_ADG_USER, CONF_ADG_PASS,
@@ -33,7 +32,6 @@ from .const import (
     CONF_UNIFI_ENABLED, CONF_UNIFI_URL, CONF_UNIFI_USER, CONF_UNIFI_PASS, CONF_UNIFI_SITE,
 )
 
-from .opnsense import OPNsenseARPClient  # (kept for historical reference; using local HTTP below)
 from .adguard import AdGuardDHCPClient
 from .unifi import UniFiClient
 
@@ -158,13 +156,6 @@ def norm_from_unifi_client(c: dict, ap_name_by_mac: dict[str, str]) -> dict:
     d["source"] = ["unifi"]
     return d
 
-def norm_from_nmap(ip: str, mac: str, vendor: str, hostname: str) -> dict:
-    d = _make_base(ip, mac)
-    if vendor: d["vendor"] = vendor
-    if hostname: d["hostname"] = hostname
-    d["source"] = ["nmap"]
-    return d
-
 def _merge_device(dst: dict, src: dict) -> dict:
     def take(path: list[str], prefer_existing: bool = False):
         d = dst; s = src
@@ -179,13 +170,48 @@ def _merge_device(dst: dict, src: dict) -> dict:
             return
         d[key] = val
 
-    for p in (["ip"], ["mac"], ["name"], ["hostname"], ["vendor"], ["type"]): take(p)
-    for p in (["wired"], ["ssid"], ["vlan"], ["network"]): take(p)
-    for p in (["ap","mac"], ["ap","name"], ["switch","mac"], ["switch","name"], ["switch","port"], ["switch","port_name"], ["switch","poe"]): take(p)
+    # Keep first decent identity/name/vendor
+    take(["ip"])
+    take(["mac"])
+    take(["name"], prefer_existing=True)
+    take(["hostname"], prefer_existing=True)
+    take(["vendor"], prefer_existing=True)
+    take(["type"], prefer_existing=False)
+
+    # network-ish
+    take(["wired"])
+    take(["ssid"], prefer_existing=True)
+    take(["vlan"])
+    take(["network"], prefer_existing=True)
+
+    # infra
+    for p in (["ap","mac"], ["ap","name"], ["switch","mac"], ["switch","name"], ["switch","port"], ["switch","port_name"], ["switch","poe"]):
+        take(p)
+
+    # signal/bytes
     for p in (["signal","rssi"], ["signal","snr"]): take(p)
     for p in (["bytes","tx"], ["bytes","rx"]): take(p)
+
+    # DHCP
     for p in (["dhcp","server"], ["dhcp","lease_ip"], ["dhcp","reservation_ip"]): take(p)
-    for p in (["first_seen"], ["last_seen"]): take(p)
+
+    # timestamps: keep the newer last_seen, older first_seen
+    for key in ("first_seen", "last_seen"):
+        src_v = src.get(key)
+        dst_v = dst.get(key)
+        if not src_v:
+            continue
+        if not dst_v:
+            dst[key] = src_v
+        else:
+            try:
+                src_ts = datetime.fromisoformat(src_v.replace("Z", "+00:00")).timestamp()
+                dst_ts = datetime.fromisoformat(dst_v.replace("Z", "+00:00")).timestamp()
+                if (key == "first_seen" and src_ts < dst_ts) or (key == "last_seen" and src_ts > dst_ts):
+                    dst[key] = src_v
+            except Exception:
+                pass
+
     dst["source"] = sorted(set((dst.get("source") or []) + (src.get("source") or [])))
     return dst
 
@@ -207,7 +233,6 @@ class ScanController:
 
         self._cidr_strings: List[str] = []
         self._cidr_nets: List[Tuple[str, object]] = []
-        self._nmap_args: str = DEFAULT_NMAP_ARGS
         self._scan_interval_minutes: int = DEFAULT_SCAN_INTERVAL_MINUTES
         self._arp_provider: str = ARP_PROVIDER_NONE
 
@@ -247,8 +272,6 @@ class ScanController:
     @property
     def cidrs(self) -> List[str]: return self._cidr_strings
     @property
-    def nmap_args(self) -> str: return self._nmap_args
-    @property
     def scan_interval_minutes(self) -> int: return self._scan_interval_minutes
     @property
     def phase(self) -> str: return self._phase
@@ -267,7 +290,6 @@ class ScanController:
             except Exception:
                 _LOGGER.warning("Invalid CIDR in config: %s", c)
 
-        self._nmap_args = _norm(opts.get("nmap_args") or data.get("nmap_args") or DEFAULT_NMAP_ARGS)
         self._scan_interval_minutes = int(opts.get("scan_interval_minutes", data.get("scan_interval_minutes", DEFAULT_SCAN_INTERVAL_MINUTES)))
         self._arp_provider = _norm(opts.get(CONF_ARP_PROVIDER) or data.get(CONF_ARP_PROVIDER) or ARP_PROVIDER_NONE)
 
@@ -318,8 +340,8 @@ class ScanController:
 
         start_ts = datetime.now(timezone.utc)
         _LOGGER.debug(
-            "Scan start gen=%d provider=%s cidrs=%s nmap_args=%r unifi_enabled=%s",
-            my_gen, self._arp_provider, self._cidr_strings, self._nmap_args, self._unifi_enabled
+            "Scan start gen=%d provider=%s cidrs=%s unifi_enabled=%s",
+            my_gen, self._arp_provider, self._cidr_strings, self._unifi_enabled
         )
 
         try:
@@ -381,87 +403,22 @@ class ScanController:
                 except Exception as exc:
                     _LOGGER.warning("UniFi fetch failed: %s", exc)
 
-            # Publish Phase-1
+            # Publish final (no nmap phase)
             if my_gen == self._scan_gen:
                 union = list(by_mac.values()) + [v for k, v in by_ip_fallback.items() if k not in by_mac]
                 directory = await self._build_effective_directory()
                 self._apply_directory_overrides(union, directory)
+
                 self._devices = sorted(union, key=lambda d: _ip_sort_key(d.get("ip", "")))
                 self._device_count = len(self._devices)
+                # Briefly surface "enriching" before OK to keep UI signals consistent
                 self._status = STATUS_ENRICHING
                 self._phase = PHASE_ARP
                 _emit_update(self.hass)
 
-            # ---------- nmap (optional) ----------
-            if self._cidr_strings:
-                def _scan_ranges(cidrs: List[str], args: str) -> Dict[str, dict]:
-                    out: Dict[str, dict] = {}
-                    try:
-                        nm = nmap.PortScanner()
-                    except Exception as exc:
-                        _LOGGER.warning("nmap init failed: %s", exc)
-                        return out
-                    for cidr in cidrs:
-                        try:
-                            nm.scan(hosts=cidr, arguments=args)
-                        except Exception as exc:
-                            _LOGGER.warning("nmap scan failed for %s: %s", cidr, exc)
-                            continue
-                        for host in nm.all_hosts():
-                            try:
-                                node = nm[host]
-                                addrs = node.get("addresses", {})
-                                ip = addrs.get("ipv4") or addrs.get("ipv6") or ""
-                                if not ip:
-                                    continue
-                                mac = _clean_mac(addrs.get("mac") or "")
-                                vendor = "Unknown"
-                                ven_map = node.get("vendor", {})
-                                if isinstance(ven_map, dict) and mac:
-                                    for k, v in ven_map.items():
-                                        if _clean_mac(k) == mac:
-                                            vendor = v; break
-                                hostname = node.hostname() or ""
-                                out[ip] = norm_from_nmap(ip, mac, vendor, hostname)
-                            except Exception as exc:
-                                _LOGGER.debug("nmap parse skip host %s: %s", host, exc)
-                    return out
-
-                try:
-                    nmap_map: Dict[str, dict] = await asyncio.wait_for(
-                        self.hass.async_add_executor_job(_scan_ranges, self._cidr_strings, self._nmap_args),
-                        timeout=60  # seconds; tune if needed
-                    )
-                except asyncio.TimeoutError:
-                    _LOGGER.warning("nmap timed out after 60s; publishing ARP/DHCP/UniFi only")
-                    nmap_map = {}
-
-                union_by_mac: Dict[str, dict] = {d.get("mac",""): d for d in self._devices if d.get("mac")}
-                ip_only: Dict[str, dict]      = {d.get("ip",""):  d for d in self._devices if not d.get("mac") and d.get("ip")}
-
-                for ip, nd in nmap_map.items():
-                    mac = nd.get("mac","")
-                    if mac:
-                        union_by_mac[mac] = _merge_device(union_by_mac.get(mac, _make_base()), nd)
-                    else:
-                        ip_only[ip] = _merge_device(ip_only.get(ip, _make_base()), nd)
-
-                final = list(union_by_mac.values()) + [v for k, v in ip_only.items() if k not in union_by_mac]
-
-                directory = await self._build_effective_directory()
-                self._apply_directory_overrides(final, directory)
-
-                if my_gen == self._scan_gen:
-                    self._devices = sorted(final, key=lambda d: _ip_sort_key(d.get("ip","")))
-                    self._device_count = len(self._devices)
-                    self._status = STATUS_OK
-                    self._phase = PHASE_NMAP
-                    _emit_update(self.hass)
-            else:
-                if my_gen == self._scan_gen:
-                    self._status = STATUS_OK if self._devices else STATUS_ERROR
-                    self._phase = PHASE_IDLE
-                    _emit_update(self.hass)
+                self._status = STATUS_OK if self._devices else STATUS_ERROR
+                self._phase = PHASE_IDLE
+                _emit_update(self.hass)
 
         except Exception as exc:
             _LOGGER.exception("Scan failed: %s", exc)
@@ -475,9 +432,8 @@ class ScanController:
                 self._is_scanning = False
                 _emit_update(self.hass)
                 _LOGGER.debug(
-                    "Scan finish gen=%d status=%s phase=%s devices=%d elapsed=%.2fs",
-                    my_gen, self._status, self._phase, self._device_count,
-                    (datetime.now(timezone.utc) - start_ts).total_seconds()
+                    "Scan finish gen=%d status=%s phase=%s devices=%d",
+                    my_gen, self._status, self._phase, self._device_count
                 )
 
     # ------------- provider impls -------------
@@ -493,21 +449,39 @@ class ScanController:
             payload["interface"] = self._opn_iface
         headers = {"Accept": "application/json", "X-Requested-With": "XMLHttpRequest"}
 
+        async def _looks_like_html(ct: str | None, body: str) -> bool:
+            ct = (ct or "").lower()
+            if "text/html" in ct:
+                return True
+            t = body.lstrip().lower()
+            return t.startswith("<!doctype") or t.startswith("<html")
+
         for path in ("search_arp", "search_arp/"):
             url = f"{base}/{path}"
             try:
                 async with session.post(url, auth=auth, data=payload, headers=headers, timeout=self._opn_timeout) as resp:
                     txt = await resp.text()
                     if resp.status >= 400:
+                        _LOGGER.debug("OPNsense %s HTTP %s: %.200s", url, resp.status, txt)
                         continue
-                    data = json.loads(txt)
+                    if _looks_like_html(resp.headers.get("Content-Type"), txt):
+                        _LOGGER.debug("OPNsense %s returned HTML (likely login page).", url)
+                        continue
+                    try:
+                        data = await resp.json(content_type=None)
+                    except Exception:
+                        try:
+                            data = json.loads(txt)
+                        except Exception:
+                            _LOGGER.debug("OPNsense %s non-JSON body: %.200s", url, txt)
+                            continue
                     mapping = self._parse_opnsense_arp(data)
                     if mapping:
                         return mapping
             except Exception as exc:
-                _LOGGER.debug("OPNsense probe %s failed: %s", path, exc)
+                _LOGGER.debug("OPNsense probe %s failed: %s", url, exc)
 
-        _LOGGER.warning("OPNsense ARP: no usable endpoint at %s", self._opn_url)
+        _LOGGER.warning("OPNsense ARP: no usable endpoint at %s (check API key/secret, interface, TLS)", self._opn_url)
         return {}
 
     def _parse_opnsense_arp(self, data: Any) -> Dict[str, str]:
