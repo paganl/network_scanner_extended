@@ -1,36 +1,25 @@
 # custom_components/network_scanner/const.py
+DOMAIN = "network_scanner"
 
-DEFAULT_SCAN_INTERVAL_MINUTES = 5
-DEFAULT_IP_RANGE = "10.0.0.0/24"
+# Options / config keys
+CONF_PROVIDER       = "provider"           # "opnsense" | "unifi" | "adguard" | "opnsense_unifi"
+CONF_VERIFY_SSL     = "verify_ssl"
+CONF_INTERVAL_MIN   = "interval_min"
 
-CONF_ARP_PROVIDER   = "arp_provider"
-ARP_PROVIDER_NONE   = "none"
-ARP_PROVIDER_OPNSENSE = "opnsense"
-ARP_PROVIDER_ADGUARD  = "adguard"
+CONF_OPNSENSE_URL   = "opnsense_url"
+CONF_KEY            = "key"
+CONF_SECRET         = "secret"
 
-CONF_ARP_VERIFY_TLS = "arp_verify_tls"
+CONF_UNIFI_URL      = "unifi_url"
+CONF_NAME           = "username"
+CONF_PASSWORD       = "password"
+CONF_TOKEN          = "token"              # optional (preferred if provided)
+CONF_SITE           = "site"               # defaults "default"
 
-# Status & phase (for UI)
-STATUS_IDLE = "idle"
-STATUS_SCANNING = "scanning"
-STATUS_ENRICHING = "enriching"
-STATUS_OK = "ok"
-STATUS_ERROR = "error"
+CONF_ADGUARD_URL    = "adguard_url"
 
-PHASE_IDLE = "idle"
-PHASE_ARP = "arp"
-
-# Dispatcher signal
-SIGNAL_NSX_UPDATED = "nsx_updated"
-
-# AdGuard
-CONF_ADG_URL  = "adguard_url"
-CONF_ADG_USER = "adguard_user"
-CONF_ADG_PASS = "adguard_pass"
-
-# UniFi
-CONF_UNIFI_ENABLED = "unifi_enabled"
-CONF_UNIFI_URL  = "unifi_url"
-CONF_UNIFI_USER = "unifi_user"
-CONF_UNIFI_PASS = "unifi_pass"
-CONF_UNIFI_SITE = "unifi_site"
+DEFAULT_OPTIONS = {
+    CONF_PROVIDER: "opnsense",
+    CONF_VERIFY_SSL: False,
+    CONF_INTERVAL_MIN: 3,
+}
