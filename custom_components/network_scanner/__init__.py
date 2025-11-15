@@ -7,7 +7,6 @@ also handles unloading and reloading entries in response to option
 changes. The logic here relies on the ``NetworkScannerCoordinator``
 defined in ``coordinator.py`` to perform periodic updates.
 """
-
 from __future__ import annotations
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -17,17 +16,25 @@ from .const import (
     CONF_PROVIDER, CONF_OPNSENSE_URL, CONF_UNIFI_URL, CONF_ADGUARD_URL,
 )
 
-from .coordinator import async_setup_coordinator, async_unload_coordinator
-
 PLATFORMS: list[str] = ["sensor"]
+
+async def async_setup(hass: HomeAssistant, config: dict) -> bool:
+    # Keep import-time side effects to a minimum
+    return True
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await _maybe_migrate_legacy_url(hass, entry)
+
+    # Defer importing the coordinator until setup time
+    from .coordinator import async_setup_coordinator
     await async_setup_coordinator(hass, entry)
+
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    # Defer importing the coordinator until unload time
+    from .coordinator import async_unload_coordinator
     ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if ok:
         await async_unload_coordinator(hass, entry)
@@ -36,7 +43,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def _maybe_migrate_legacy_url(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """One-time migration for old installs that still stored a `url`."""
     opts = dict(entry.options or {})
-    legacy = (opts.pop("url", "") or "").strip()   # <- remove if present
+    legacy = (opts.pop("url", "") or "").strip()
     if not legacy:
         return
 
@@ -52,4 +59,3 @@ async def _maybe_migrate_legacy_url(hass: HomeAssistant, entry: ConfigEntry) -> 
 
     if changed:
         hass.config_entries.async_update_entry(entry, options=opts)
-
