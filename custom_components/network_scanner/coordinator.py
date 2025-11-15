@@ -14,11 +14,11 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .const import (
-    DOMAIN, DEFAULT_OPTIONS,
-    CONF_PROVIDER, CONF_URL, CONF_OPNSENSE_URL, CONF_UNIFI_URL,
+    CONF_PROVIDER, CONF_VERIFY_SSL,
+    CONF_OPNSENSE_URL, CONF_UNIFI_URL, CONF_ADGUARD_URL,
     CONF_KEY, CONF_SECRET, CONF_NAME, CONF_PASSWORD, CONF_TOKEN,
-    CONF_VERIFY_SSL, CONF_INTERVAL_MIN,
 )
+
 from .provider import opnsense, unifi, adguard
 
 _LOGGER = logging.getLogger(__name__)
@@ -237,11 +237,10 @@ class NetworkScannerCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
 
         # Helper: resolve URLs
         def _u(kind: str) -> str:
-            if kind == "opnsense":
-                return (self.options.get(CONF_OPNSENSE_URL) or self.options.get(CONF_URL) or "").rstrip("/")
-            if kind == "unifi":
-                return (self.options.get(CONF_UNIFI_URL) or self.options.get(CONF_URL) or "").rstrip("/")
-            return (self.options.get(CONF_URL) or "").rstrip("/")
+            if kind == "opnsense": return (self.options.get(CONF_OPNSENSE_URL) or "").rstrip("/")
+            if kind == "unifi":    return (self.options.get(CONF_UNIFI_URL) or "").rstrip("/")
+            if kind == "adguard":  return (self.options.get(CONF_ADGUARD_URL) or "").rstrip("/")
+            return ""
 
         out: Dict[str, List[Dict[str, Any]]] = {}
 
