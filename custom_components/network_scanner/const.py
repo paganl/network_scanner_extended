@@ -1,44 +1,41 @@
 # custom_components/network_scanner/const.py
 from __future__ import annotations
-from typing import Final, Dict, Any
 
-DOMAIN: Final = "network_scanner"
-INTEGRATION_NAME: Final = "Network Scanner Extended (Lean)"
-VERSION: Final = "0.14.4"
+DOMAIN = "network_scanner"
 
-# Provider + URLs
-CONF_PROVIDER: Final = "provider"
-CONF_URL: Final = "url"  # legacy catch-all (migration only)
-CONF_OPNSENSE_URL: Final = "opnsense_url"
-CONF_UNIFI_URL: Final = "unifi_url"
-CONF_ADGUARD_URL: Final = "adguard_url"
+# Provider selection
+CONF_PROVIDER = "provider"
+PROVIDER_OPNSENSE = "opnsense"
+PROVIDER_UNIFI = "unifi"
+PROVIDER_ADGUARD = "adguard"
+PROVIDER_OPNSENSE_UNIFI = "opnsense_unifi"
 
-# Auth fields
-CONF_KEY: Final = "key"            # OPNsense API key
-CONF_SECRET: Final = "secret"      # OPNsense API secret
-CONF_NAME: Final = "name"          # Username (UniFi/AdGuard)
-CONF_PASSWORD: Final = "password"
-CONF_TOKEN: Final = "token"        # UniFi API token
+# Per-provider URLs
+CONF_OPNSENSE_URL = "opnsense_url"
+CONF_UNIFI_URL = "unifi_url"
+CONF_ADGUARD_URL = "adguard_url"
 
-# Auth mode (used by config_flow)
-CONF_AUTH_MODE: Final = "auth_mode"
-AUTH_MODE_PASSWORD: Final = "password"
-AUTH_MODE_TOKEN: Final = "token"
+# Auth + creds
+CONF_AUTH_MODE = "auth_mode"        # how we authenticate to UniFi
+AUTH_MODE_PASSWORD = "password"     # preferred name
+AUTH_MODE_TOKEN = "token"
 
-# Misc options
-CONF_VERIFY_SSL: Final = "verify_ssl"
-CONF_INTERVAL_MIN: Final = "interval_min"
+# ---- Backward-compat shims (legacy names some flows still import) ----
+AUTH_MODE_USERPASS = AUTH_MODE_PASSWORD   # legacy alias -> keep imports working
 
-# Defaults used by coordinator
-DEFAULT_OPTIONS: Dict[str, Any] = {
-    CONF_PROVIDER: "opnsense",       # "opnsense" | "unifi" | "adguard" | "opnsense_unifi"
+# Credentials/keys
+CONF_KEY = "key"            # OPNsense API key
+CONF_SECRET = "secret"      # OPNsense API secret
+CONF_NAME = "username"      # UniFi / AdGuard username
+CONF_PASSWORD = "password"  # UniFi / AdGuard password
+CONF_TOKEN = "token"        # UniFi API token
+
+# Common options
+CONF_VERIFY_SSL = "verify_ssl"
+CONF_INTERVAL_MIN = "interval_minutes"
+
+DEFAULT_OPTIONS = {
+    CONF_PROVIDER: PROVIDER_OPNSENSE,
     CONF_VERIFY_SSL: False,
     CONF_INTERVAL_MIN: 3,
 }
-
-# Heuristic constant
-ASSUMED_ARP_TTL_S: Final = 1200
-
-# Optional helper tuples your config_flow may import
-PROVIDERS: tuple[str, ...] = ("opnsense", "unifi", "adguard", "opnsense_unifi")
-AUTH_MODES: tuple[str, ...] = (AUTH_MODE_PASSWORD, AUTH_MODE_TOKEN)
