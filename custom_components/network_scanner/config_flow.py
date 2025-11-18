@@ -1,7 +1,7 @@
 # custom_components/network_scanner/config_flow.py
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 import voluptuous as vol
 
 from homeassistant import config_entries
@@ -18,19 +18,18 @@ from .const import (
     CONF_OPNSENSE_URL,
     CONF_UNIFI_URL,
     CONF_ADGUARD_URL,
-    # auth + creds
-    CONF_AUTH_MODE,
-    AUTH_MODE_PASSWORD,
-    AUTH_MODE_TOKEN,
+    # creds / tokens
     CONF_KEY,
     CONF_SECRET,
     CONF_NAME,
     CONF_PASSWORD,
-    CONF_TOKEN,
+    CONF_UNIFI_TOKEN,
     # common
     CONF_VERIFY_SSL,
     CONF_INTERVAL_MIN,
     DEFAULT_OPTIONS,
+    # optional (if you have it in const.py; otherwise remove these two lines)
+    CONF_UNIFI_SITE,
 )
 
 PROVIDER_CHOICES = [
@@ -40,7 +39,9 @@ PROVIDER_CHOICES = [
     PROVIDER_OPNSENSE_UNIFI,
 ]
 
-AUTH_MODE_CHOICES = [AUTH_MODE_PASSWORD, AUTH_MODE_TOKEN]
+
+def _rstrip_url(v: Optional[str]) -> str:
+    return (v or "").strip().rstrip("/")
 
 
 class NetworkScannerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -56,11 +57,13 @@ class NetworkScannerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     def async_get_options_flow(config_entry):
         return NetworkScannerOptionsFlow(config_entry)
 
+    # ------------------- initial step -------------------
+
     async def async_step_user(self, user_input: Dict[str, Any] | None = None):
         """Step 1: choose provider + common options."""
         if user_input is not None:
             self._opts[CONF_PROVIDER] = user_input[CONF_PROVIDER]
-            self._opts[CONF_VERIFY_SSL] = user_input.get(CONF_VERIFY_SSL, False)
+            self._opts[CONF_VERIFY_SSL] = bool(user_input.get(CONF_VERIFY_SSL, False))
             self._opts[CONF_INTERVAL_MIN] = max(1, int(user_input.get(CONF_INTERVAL_MIN, 3)))
 
             prov = self._opts[CONF_PROVIDER]
@@ -73,100 +76,155 @@ class NetworkScannerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if prov == PROVIDER_OPNSENSE_UNIFI:
                 return await self.async_step_opnsense_unifi()
 
-        schema = vol.Schema({
-            vol.Required(CONF_PROVIDER, default=self._opts.get(CONF_PROVIDER, PROVIDER_OPNSENSE)):
-                vol.In(PROVIDER_CHOICES),
-            vol.Optional(CONF_VERIFY_SSL, default=self._opts.get(CONF_VERIFY_SSL, False)): bool,
-            vol.Optional(CONF_INTERVAL_MIN, default=self._opts.get(CONF_INTERVAL_MIN, 3)): int,
-        })
+        schema = vol.Schema(
+            {
+                vol.Required(
+                    CONF_PROVIDER,
+                    default=self._opts.get(CONF_PROVIDER, PROVIDER_OPNSENSE),
+                ): vol.In(PROVIDER_CHOICES),
+                vol.Optional(CONF_VERIFY_SSL, default=self._opts.get(CONF_VERIFY_SSL, False)): bool,
+                vol.Optional(CONF_INTERVAL_MIN, default=self._opts.get(CONF_INTERVAL_MIN, 3)): int,
+            }
+        )
         return self.async_show_form(step_id="user", data_schema=schema)
 
-    # ----- Provider-specific steps -----
+    # ------------------- provider steps -------------------
 
     async def async_step_opnsense(self, user_input: Dict[str, Any] | None = None):
+        errors: Dict[str, str] = {}
         if user_input is not None:
-            self._opts[CONF_OPNSENSE_URL] = user_input[CONF_OPNSENSE_URL].rstrip("/")
-            self._opts[CONF_KEY] = user_input.get(CONF_KEY, "")
-            self._opts[CONF_SECRET] = user_input.get(CONF_SECRET, "")
-            return await self._finish()
+            url = _rstrip_url(user_input.get(CONF_OPNSENSE_URL))
+            key = (user_input.get(CONF_KEY) or "").strip()
+            sec = (user_input.get(CONF_SECRET) or "").strip()
+            if not url:
+                errors["base"] = "opnsense_url_required"
+            elif not key or not sec:
+                errors["base"] = "opnsense_creds_required"
+            else:
+                self._opts[CONF_OPNSENSE_URL] = url
+                self._opts[CONF_KEY] = key
+                self._opts[CONF_SECRET] = sec
+                return await self._finish()
 
-        schema = vol.Schema({
-            vol.Required(CONF_OPNSENSE_URL): str,
-            vol.Required(CONF_KEY): str,
-            vol.Required(CONF_SECRET): str,
-        })
-        return self.async_show_form(step_id="opnsense", data_schema=schema)
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_OPNSENSE_URL, default=self._opts.get(CONF_OPNSENSE_URL, "")): str,
+                vol.Required(CONF_KEY, default=self._opts.get(CONF_KEY, "")): str,
+                vol.Required(CONF_SECRET, default=self._opts.get(CONF_SECRET, "")): str,
+            }
+        )
+        return self.async_show_form(step_id="opnsense", data_schema=schema, errors=errors)
 
     async def async_step_unifi(self, user_input: Dict[str, Any] | None = None):
+        errors: Dict[str, str] = {}
         if user_input is not None:
-            self._opts[CONF_UNIFI_URL] = user_input[CONF_UNIFI_URL].rstrip("/")
-            self._opts[CONF_AUTH_MODE] = user_input[CONF_AUTH_MODE]
-            if self._opts[CONF_AUTH_MODE] == AUTH_MODE_TOKEN:
-                self._opts[CONF_TOKEN] = user_input.get(CONF_TOKEN, "")
-                self._opts[CONF_NAME] = ""
-                self._opts[CONF_PASSWORD] = ""
-            else:
-                self._opts[CONF_NAME] = user_input.get(CONF_NAME, "")
-                self._opts[CONF_PASSWORD] = user_input.get(CONF_PASSWORD, "")
-                self._opts[CONF_TOKEN] = ""
-            return await self._finish()
+            url = _rstrip_url(user_input.get(CONF_UNIFI_URL))
+            token = (user_input.get(CONF_UNIFI_TOKEN) or "").strip()
+            name = (user_input.get(CONF_NAME) or "").strip()
+            pwd = (user_input.get(CONF_PASSWORD) or "").strip()
+            site = (user_input.get(CONF_UNIFI_SITE) or "default").strip() if "CONF_UNIFI_SITE" in globals() else "default"
 
-        # present both variants; we’ll validate minimal requirements
-        schema = vol.Schema({
-            vol.Required(CONF_UNIFI_URL): str,
-            vol.Required(CONF_AUTH_MODE, default=AUTH_MODE_TOKEN): vol.In(AUTH_MODE_CHOICES),
-            vol.Optional(CONF_TOKEN, default=""): str,
-            vol.Optional(CONF_NAME, default=""): str,
-            vol.Optional(CONF_PASSWORD, default=""): str,
-        })
-        return self.async_show_form(step_id="unifi", data_schema=schema)
+            if not url:
+                errors["base"] = "unifi_url_required"
+            elif not token and (not name or not pwd):
+                errors["base"] = "unifi_auth_required"  # token OR (user & pass)
+            else:
+                self._opts[CONF_UNIFI_URL] = url
+                self._opts[CONF_UNIFI_TOKEN] = token
+                self._opts[CONF_NAME] = "" if token else name
+                self._opts[CONF_PASSWORD] = "" if token else pwd
+                if "CONF_UNIFI_SITE" in globals():
+                    self._opts[CONF_UNIFI_SITE] = site
+                return await self._finish()
+
+        schema = {
+            vol.Required(CONF_UNIFI_URL, default=self._opts.get(CONF_UNIFI_URL, "")): str,
+            vol.Optional(CONF_UNIFI_TOKEN, default=self._opts.get(CONF_UNIFI_TOKEN, "")): str,
+            vol.Optional(CONF_NAME, default=self._opts.get(CONF_NAME, "")): str,
+            vol.Optional(CONF_PASSWORD, default=self._opts.get(CONF_PASSWORD, "")): str,
+        }
+        if "CONF_UNIFI_SITE" in globals():
+            schema[vol.Optional(CONF_UNIFI_SITE, default=self._opts.get(CONF_UNIFI_SITE, "default"))] = str
+        return self.async_show_form(step_id="unifi", data_schema=vol.Schema(schema), errors=errors)
 
     async def async_step_adguard(self, user_input: Dict[str, Any] | None = None):
+        errors: Dict[str, str] = {}
         if user_input is not None:
-            self._opts[CONF_ADGUARD_URL] = user_input[CONF_ADGUARD_URL].rstrip("/")
-            self._opts[CONF_NAME] = user_input.get(CONF_NAME, "admin")
-            self._opts[CONF_PASSWORD] = user_input.get(CONF_PASSWORD, "")
-            return await self._finish()
+            url = _rstrip_url(user_input.get(CONF_ADGUARD_URL))
+            name = (user_input.get(CONF_NAME) or "admin").strip()
+            pwd = (user_input.get(CONF_PASSWORD) or "").strip()
+            if not url:
+                errors["base"] = "adguard_url_required"
+            else:
+                self._opts[CONF_ADGUARD_URL] = url
+                self._opts[CONF_NAME] = name
+                self._opts[CONF_PASSWORD] = pwd
+                return await self._finish()
 
-        schema = vol.Schema({
-            vol.Required(CONF_ADGUARD_URL): str,
-            vol.Optional(CONF_NAME, default="admin"): str,
-            vol.Optional(CONF_PASSWORD, default=""): str,
-        })
-        return self.async_show_form(step_id="adguard", data_schema=schema)
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_ADGUARD_URL, default=self._opts.get(CONF_ADGUARD_URL, "")): str,
+                vol.Optional(CONF_NAME, default=self._opts.get(CONF_NAME, "admin")): str,
+                vol.Optional(CONF_PASSWORD, default=self._opts.get(CONF_PASSWORD, "")): str,
+            }
+        )
+        return self.async_show_form(step_id="adguard", data_schema=schema, errors=errors)
 
     async def async_step_opnsense_unifi(self, user_input: Dict[str, Any] | None = None):
+        errors: Dict[str, str] = {}
         if user_input is not None:
             # OPNsense
-            self._opts[CONF_OPNSENSE_URL] = user_input[CONF_OPNSENSE_URL].rstrip("/")
-            self._opts[CONF_KEY] = user_input.get(CONF_KEY, "")
-            self._opts[CONF_SECRET] = user_input.get(CONF_SECRET, "")
+            url_opn = _rstrip_url(user_input.get(CONF_OPNSENSE_URL))
+            key = (user_input.get(CONF_KEY) or "").strip()
+            sec = (user_input.get(CONF_SECRET) or "").strip()
             # UniFi
-            self._opts[CONF_UNIFI_URL] = user_input[CONF_UNIFI_URL].rstrip("/")
-            self._opts[CONF_AUTH_MODE] = user_input[CONF_AUTH_MODE]
-            if self._opts[CONF_AUTH_MODE] == AUTH_MODE_TOKEN:
-                self._opts[CONF_TOKEN] = user_input.get(CONF_TOKEN, "")
-                self._opts[CONF_NAME] = ""
-                self._opts[CONF_PASSWORD] = ""
-            else:
-                self._opts[CONF_NAME] = user_input.get(CONF_NAME, "")
-                self._opts[CONF_PASSWORD] = user_input.get(CONF_PASSWORD, "")
-                self._opts[CONF_TOKEN] = ""
-            return await self._finish()
+            url_uni = _rstrip_url(user_input.get(CONF_UNIFI_URL))
+            token = (user_input.get(CONF_UNIFI_TOKEN) or "").strip()
+            name = (user_input.get(CONF_NAME) or "").strip()
+            pwd = (user_input.get(CONF_PASSWORD) or "").strip()
+            site = (user_input.get(CONF_UNIFI_SITE) or "default").strip() if "CONF_UNIFI_SITE" in globals() else "default"
 
-        schema = vol.Schema({
+            if not url_opn or not key or not sec:
+                errors["base"] = "opnsense_unifi_opnsense_required"
+            elif not url_uni:
+                errors["base"] = "opnsense_unifi_unifi_url_required"
+            elif not token and (not name or not pwd):
+                errors["base"] = "opnsense_unifi_unifi_auth_required"
+            else:
+                self._opts[CONF_OPNSENSE_URL] = url_opn
+                self._opts[CONF_KEY] = key
+                self._opts[CONF_SECRET] = sec
+
+                self._opts[CONF_UNIFI_URL] = url_uni
+                self._opts[CONF_UNIFI_TOKEN] = token
+                self._opts[CONF_NAME] = "" if token else name
+                self._opts[CONF_PASSWORD] = "" if token else pwd
+                if "CONF_UNIFI_SITE" in globals():
+                    self._opts[CONF_UNIFI_SITE] = site
+
+                return await self._finish()
+
+        schema_dict: Dict[Any, Any] = {
             # OPNsense
-            vol.Required(CONF_OPNSENSE_URL): str,
-            vol.Required(CONF_KEY): str,
-            vol.Required(CONF_SECRET): str,
+            vol.Required(CONF_OPNSENSE_URL, default=self._opts.get(CONF_OPNSENSE_URL, "")): str,
+            vol.Required(CONF_KEY, default=self._opts.get(CONF_KEY, "")): str,
+            vol.Required(CONF_SECRET, default=self._opts.get(CONF_SECRET, "")): str,
             # UniFi
-            vol.Required(CONF_UNIFI_URL): str,
-            vol.Required(CONF_AUTH_MODE, default=AUTH_MODE_TOKEN): vol.In(AUTH_MODE_CHOICES),
-            vol.Optional(CONF_TOKEN, default=""): str,
-            vol.Optional(CONF_NAME, default=""): str,
-            vol.Optional(CONF_PASSWORD, default=""): str,
-        })
-        return self.async_show_form(step_id="opnsense_unifi", data_schema=schema)
+            vol.Required(CONF_UNIFI_URL, default=self._opts.get(CONF_UNIFI_URL, "")): str,
+            vol.Optional(CONF_UNIFI_TOKEN, default=self._opts.get(CONF_UNIFI_TOKEN, "")): str,
+            vol.Optional(CONF_NAME, default=self._opts.get(CONF_NAME, "")): str,
+            vol.Optional(CONF_PASSWORD, default=self._opts.get(CONF_PASSWORD, "")): str,
+        }
+        if "CONF_UNIFI_SITE" in globals():
+            schema_dict[vol.Optional(CONF_UNIFI_SITE, default=self._opts.get(CONF_UNIFI_SITE, "default"))] = str
+
+        return self.async_show_form(
+            step_id="opnsense_unifi",
+            data_schema=vol.Schema(schema_dict),
+            errors=errors,
+        )
+
+    # ------------------- finish -------------------
 
     async def _finish(self):
         # Single entry; make re-adding idempotent
@@ -183,14 +241,14 @@ class NetworkScannerOptionsFlow(config_entries.OptionsFlow):
         self._opts: Dict[str, Any] = dict(entry.options or DEFAULT_OPTIONS)
 
     async def async_step_init(self, user_input: Dict[str, Any] | None = None):
-        """Entry point for options."""
         return await self.async_step_user(user_input)
 
     async def async_step_user(self, user_input: Dict[str, Any] | None = None):
         if user_input is not None:
             self._opts[CONF_PROVIDER] = user_input[CONF_PROVIDER]
-            self._opts[CONF_VERIFY_SSL] = user_input.get(CONF_VERIFY_SSL, False)
+            self._opts[CONF_VERIFY_SSL] = bool(user_input.get(CONF_VERIFY_SSL, False))
             self._opts[CONF_INTERVAL_MIN] = max(1, int(user_input.get(CONF_INTERVAL_MIN, 3)))
+
             prov = self._opts[CONF_PROVIDER]
             if prov == PROVIDER_OPNSENSE:
                 return await self.async_step_opnsense()
@@ -201,98 +259,110 @@ class NetworkScannerOptionsFlow(config_entries.OptionsFlow):
             if prov == PROVIDER_OPNSENSE_UNIFI:
                 return await self.async_step_opnsense_unifi()
 
-        schema = vol.Schema({
-            vol.Required(CONF_PROVIDER, default=self._opts.get(CONF_PROVIDER, PROVIDER_OPNSENSE)):
-                vol.In(PROVIDER_CHOICES),
-            vol.Optional(CONF_VERIFY_SSL, default=self._opts.get(CONF_VERIFY_SSL, False)): bool,
-            vol.Optional(CONF_INTERVAL_MIN, default=self._opts.get(CONF_INTERVAL_MIN, 3)): int,
-        })
+        schema = vol.Schema(
+            {
+                vol.Required(
+                    CONF_PROVIDER,
+                    default=self._opts.get(CONF_PROVIDER, PROVIDER_OPNSENSE),
+                ): vol.In(PROVIDER_CHOICES),
+                vol.Optional(CONF_VERIFY_SSL, default=self._opts.get(CONF_VERIFY_SSL, False)): bool,
+                vol.Optional(CONF_INTERVAL_MIN, default=self._opts.get(CONF_INTERVAL_MIN, 3)): int,
+            }
+        )
         return self.async_show_form(step_id="user", data_schema=schema)
 
     async def async_step_opnsense(self, user_input: Dict[str, Any] | None = None):
         if user_input is not None:
-            self._opts[CONF_OPNSENSE_URL] = user_input[CONF_OPNSENSE_URL].rstrip("/")
-            self._opts[CONF_KEY] = user_input.get(CONF_KEY, "")
-            self._opts[CONF_SECRET] = user_input.get(CONF_SECRET, "")
+            self._opts[CONF_OPNSENSE_URL] = _rstrip_url(user_input.get(CONF_OPNSENSE_URL))
+            self._opts[CONF_KEY] = (user_input.get(CONF_KEY) or "").strip()
+            self._opts[CONF_SECRET] = (user_input.get(CONF_SECRET) or "").strip()
             return await self._finish()
-        schema = vol.Schema({
-            vol.Required(CONF_OPNSENSE_URL, default=self._opts.get(CONF_OPNSENSE_URL, "")): str,
-            vol.Required(CONF_KEY, default=self._opts.get(CONF_KEY, "")): str,
-            vol.Required(CONF_SECRET, default=self._opts.get(CONF_SECRET, "")): str,
-        })
+
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_OPNSENSE_URL, default=self._opts.get(CONF_OPNSENSE_URL, "")): str,
+                vol.Required(CONF_KEY, default=self._opts.get(CONF_KEY, "")): str,
+                vol.Required(CONF_SECRET, default=self._opts.get(CONF_SECRET, "")): str,
+            }
+        )
         return self.async_show_form(step_id="opnsense", data_schema=schema)
 
     async def async_step_unifi(self, user_input: Dict[str, Any] | None = None):
         if user_input is not None:
-            self._opts[CONF_UNIFI_URL] = user_input[CONF_UNIFI_URL].rstrip("/")
-            self._opts[CONF_AUTH_MODE] = user_input[CONF_AUTH_MODE]
-            if self._opts[CONF_AUTH_MODE] == AUTH_MODE_TOKEN:
-                self._opts[CONF_TOKEN] = user_input.get(CONF_TOKEN, "")
+            self._opts[CONF_UNIFI_URL] = _rstrip_url(user_input.get(CONF_UNIFI_URL))
+            self._opts[CONF_UNIFI_TOKEN] = (user_input.get(CONF_UNIFI_TOKEN) or "").strip()
+            if self._opts[CONF_UNIFI_TOKEN]:
+                # token path -> blank out user/pass
                 self._opts[CONF_NAME] = ""
                 self._opts[CONF_PASSWORD] = ""
             else:
-                self._opts[CONF_NAME] = user_input.get(CONF_NAME, "")
-                self._opts[CONF_PASSWORD] = user_input.get(CONF_PASSWORD, "")
-                self._opts[CONF_TOKEN] = ""
+                self._opts[CONF_NAME] = (user_input.get(CONF_NAME) or "").strip()
+                self._opts[CONF_PASSWORD] = (user_input.get(CONF_PASSWORD) or "").strip()
+            if "CONF_UNIFI_SITE" in globals():
+                self._opts[CONF_UNIFI_SITE] = (user_input.get(CONF_UNIFI_SITE) or "default").strip()
             return await self._finish()
 
-        schema = vol.Schema({
+        schema_dict: Dict[Any, Any] = {
             vol.Required(CONF_UNIFI_URL, default=self._opts.get(CONF_UNIFI_URL, "")): str,
-            vol.Required(CONF_AUTH_MODE, default=self._opts.get(CONF_AUTH_MODE, AUTH_MODE_TOKEN)):
-                vol.In(AUTH_MODE_CHOICES),
-            vol.Optional(CONF_TOKEN, default=self._opts.get(CONF_TOKEN, "")): str,
+            vol.Optional(CONF_UNIFI_TOKEN, default=self._opts.get(CONF_UNIFI_TOKEN, "")): str,
             vol.Optional(CONF_NAME, default=self._opts.get(CONF_NAME, "")): str,
             vol.Optional(CONF_PASSWORD, default=self._opts.get(CONF_PASSWORD, "")): str,
-        })
-        return self.async_show_form(step_id="unifi", data_schema=schema)
+        }
+        if "CONF_UNIFI_SITE" in globals():
+            schema_dict[vol.Optional(CONF_UNIFI_SITE, default=self._opts.get(CONF_UNIFI_SITE, "default"))] = str
+
+        return self.async_show_form(step_id="unifi", data_schema=vol.Schema(schema_dict))
 
     async def async_step_adguard(self, user_input: Dict[str, Any] | None = None):
         if user_input is not None:
-            self._opts[CONF_ADGUARD_URL] = user_input[CONF_ADGUARD_URL].rstrip("/")
-            self._opts[CONF_NAME] = user_input.get(CONF_NAME, "admin")
-            self._opts[CONF_PASSWORD] = user_input.get(CONF_PASSWORD, "")
+            self._opts[CONF_ADGUARD_URL] = _rstrip_url(user_input.get(CONF_ADGUARD_URL))
+            self._opts[CONF_NAME] = (user_input.get(CONF_NAME) or "admin").strip()
+            self._opts[CONF_PASSWORD] = (user_input.get(CONF_PASSWORD) or "").strip()
             return await self._finish()
 
-        schema = vol.Schema({
-            vol.Required(CONF_ADGUARD_URL, default=self._opts.get(CONF_ADGUARD_URL, "")): str,
-            vol.Optional(CONF_NAME, default=self._opts.get(CONF_NAME, "admin")): str,
-            vol.Optional(CONF_PASSWORD, default=self._opts.get(CONF_PASSWORD, "")): str,
-        })
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_ADGUARD_URL, default=self._opts.get(CONF_ADGUARD_URL, "")): str,
+                vol.Optional(CONF_NAME, default=self._opts.get(CONF_NAME, "admin")): str,
+                vol.Optional(CONF_PASSWORD, default=self._opts.get(CONF_PASSWORD, "")): str,
+            }
+        )
         return self.async_show_form(step_id="adguard", data_schema=schema)
 
     async def async_step_opnsense_unifi(self, user_input: Dict[str, Any] | None = None):
         if user_input is not None:
             # OPNsense
-            self._opts[CONF_OPNSENSE_URL] = user_input[CONF_OPNSENSE_URL].rstrip("/")
-            self._opts[CONF_KEY] = user_input.get(CONF_KEY, "")
-            self._opts[CONF_SECRET] = user_input.get(CONF_SECRET, "")
+            self._opts[CONF_OPNSENSE_URL] = _rstrip_url(user_input.get(CONF_OPNSENSE_URL))
+            self._opts[CONF_KEY] = (user_input.get(CONF_KEY) or "").strip()
+            self._opts[CONF_SECRET] = (user_input.get(CONF_SECRET) or "").strip()
             # UniFi
-            self._opts[CONF_UNIFI_URL] = user_input[CONF_UNIFI_URL].rstrip("/")
-            self._opts[CONF_AUTH_MODE] = user_input[CONF_AUTH_MODE]
-            if self._opts[CONF_AUTH_MODE] == AUTH_MODE_TOKEN:
-                self._opts[CONF_TOKEN] = user_input.get(CONF_TOKEN, "")
+            self._opts[CONF_UNIFI_URL] = _rstrip_url(user_input.get(CONF_UNIFI_URL))
+            self._opts[CONF_UNIFI_TOKEN] = (user_input.get(CONF_UNIFI_TOKEN) or "").strip()
+            if self._opts[CONF_UNIFI_TOKEN]:
                 self._opts[CONF_NAME] = ""
                 self._opts[CONF_PASSWORD] = ""
             else:
-                self._opts[CONF_NAME] = user_input.get(CONF_NAME, "")
-                self._opts[CONF_PASSWORD] = user_input.get(CONF_PASSWORD, "")
-                self._opts[CONF_TOKEN] = ""
+                self._opts[CONF_NAME] = (user_input.get(CONF_NAME) or "").strip()
+                self._opts[CONF_PASSWORD] = (user_input.get(CONF_PASSWORD) or "").strip()
+            if "CONF_UNIFI_SITE" in globals():
+                self._opts[CONF_UNIFI_SITE] = (user_input.get(CONF_UNIFI_SITE) or "default").strip()
             return await self._finish()
 
-        schema = vol.Schema({
+        schema_dict: Dict[Any, Any] = {
             # OPNsense
             vol.Required(CONF_OPNSENSE_URL, default=self._opts.get(CONF_OPNSENSE_URL, "")): str,
             vol.Required(CONF_KEY, default=self._opts.get(CONF_KEY, "")): str,
             vol.Required(CONF_SECRET, default=self._opts.get(CONF_SECRET, "")): str,
             # UniFi
             vol.Required(CONF_UNIFI_URL, default=self._opts.get(CONF_UNIFI_URL, "")): str,
-            vol.Required(CONF_AUTH_MODE, default=self._opts.get(CONF_AUTH_MODE, AUTH_MODE_TOKEN)):
-                vol.In(AUTH_MODE_CHOICES),
-            vol.Optional(CONF_TOKEN, default=self._opts.get(CONF_TOKEN, "")): str,
+            vol.Optional(CONF_UNIFI_TOKEN, default=self._opts.get(CONF_UNIFI_TOKEN, "")): str,
             vol.Optional(CONF_NAME, default=self._opts.get(CONF_NAME, "")): str,
             vol.Optional(CONF_PASSWORD, default=self._opts.get(CONF_PASSWORD, "")): str,
-        })
-        return self.async_show_form(step_id="opnsense_unifi", data_schema=schema)
+        }
+        if "CONF_UNIFI_SITE" in globals():
+            schema_dict[vol.Optional(CONF_UNIFI_SITE, default=self._opts.get(CONF_UNIFI_SITE, "default"))] = str
+
+        return self.async_show_form(step_id="opnsense_unifi", data_schema=vol.Schema(schema_dict))
 
     async def _finish(self):
         return self.async_create_entry(title="Network Scanner", data={}, options=self._opts)
