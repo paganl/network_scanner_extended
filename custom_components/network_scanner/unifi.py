@@ -11,49 +11,48 @@ _LOGGER = logging.getLogger(__name__)
 
 
 def _extract_csrf_from_json(txt: str) -> str:
-    """
-    Try to pull a CSRF token out of known UniFi JSON shapes, e.g.
-      {"meta":{"rc":"ok","csrf_token":"..."},"data":[]}
-      {"data":[{"csrf_token":"..."}]}
-    """
+    """Pull CSRF token out of common UniFi JSON shapes."""
     try:
         j = json.loads(txt)
     except Exception:
         return ""
-    token = ""
     if isinstance(j, dict):
-        meta = j.get("meta", {})
-        if isinstance(meta, dict):
-            token = meta.get("csrf_token", "") or token
-        if not token and isinstance(j.get("data"), list) and j["data"]:
-            first = j["data"][0]
-            if isinstance(first, dict):
-                token = first.get("csrf_token", "") or token
-    return token
+        meta = j.get("meta")
+        if isinstance(meta, dict) and isinstance(meta.get("csrf_token"), str):
+            return meta["csrf_token"]
+        data = j.get("data")
+        if isinstance(data, list) and data and isinstance(data[0], dict):
+            t = data[0].get("csrf_token")
+            if isinstance(t, str):
+                return t
+    return ""
 
 
 class UniFiClient:
     """
-    UniFi client with CSRF-aware auth (UniFi OS & legacy).
+    UniFi client with token OR user/pass auth, CSRF awareness, API root detection,
+    and 401 auto-retry (re-auth + re-probe once).
 
-    Login order:
-      1) UniFi OS:   POST /api/auth/login  (+ later CSRF at /api/auth/csrf)
-      2) Legacy:     POST /api/login       (+ later CSRF at /api/csrf)
+    Login order (when using user/pass):
+      1) UniFi OS:   POST /api/auth/login
+      2) Legacy:     POST /api/login
 
-    Root probe (after login + CSRF pickup):
-      - /proxy/network/api/self/sites  (UniFi OS proxy)
-      - /api/self/sites                (legacy/direct)
+    CSRF pickup:
+      - Try /api/auth/csrf, then /api/csrf (header X-Csrf-Token or JSON body)
 
-    Data:
-      - GET {root}/s/{site}/stat/sta
-      - GET {root}/s/{site}/stat/device
+    API root probe (after auth + CSRF):
+      - /proxy/network/api/self/sites
+      - /api/self/sites
+      - fallback: hit data endpoints directly under /api
     """
 
     def __init__(
         self,
         base_url: str,
-        username: str,
-        password: str,
+        username: str = "",
+        password: str = "",
+        *,
+        token: str = "",
         site: str = "default",
         verify_tls: bool = True,
         timeout: int = 10,
@@ -61,13 +60,14 @@ class UniFiClient:
         self.base = (base_url or "").rstrip("/")
         self.user = username or ""
         self.passwd = password or ""
+        self.token = token or ""
         self.site = site or "default"
         self.verify_tls = bool(verify_tls)
         self.timeout = ClientTimeout(total=timeout)
 
         self._api_root: Optional[str] = None   # "/proxy/network/api" or "/api"
         self._csrf: Optional[str] = None
-        self._mode: Optional[str] = None       # "os" | "legacy"
+        self._mode: Optional[str] = None       # "os" | "legacy" | "token"
 
     # ---------------- low-level HTTP ----------------
 
@@ -80,34 +80,37 @@ class UniFiClient:
             "Content-Type": "application/json",
             "Referer": self.base + "/",
             "Origin": self.base,
-            "X-Requested-With": "XMLHttpRequest",  # needed by some legacy /api/csrf
+            "X-Requested-With": "XMLHttpRequest",
         }
+        if self.token:
+            h["Authorization"] = f"Bearer {self.token}"
         token = extra_csrf if extra_csrf is not None else self._csrf
         if token:
             h["X-Csrf-Token"] = token
         return h
 
-    async def _get_any(self, hass, path: str) -> tuple[int, str]:
+    async def _request(self, hass, method: str, path: str, *, json_body: Any = None, form_body: Any = None) -> tuple[int, str]:
         sess = await self._session(hass)
-        async with sess.get(self.base + path, headers=self._headers(), timeout=self.timeout) as resp:
-            return resp.status, await resp.text()
-
-    async def _post_json(self, hass, path: str, payload: dict, csrf: Optional[str]) -> tuple[int, str]:
-        sess = await self._session(hass)
-        async with sess.post(self.base + path, json=payload, headers=self._headers(csrf), timeout=self.timeout) as resp:
-            return resp.status, await resp.text()
-
-    async def _post_form(self, hass, path: str, payload: dict, csrf: Optional[str]) -> tuple[int, str]:
-        sess = await self._session(hass)
-        async with sess.post(self.base + path, data=payload, headers=self._headers(csrf), timeout=self.timeout) as resp:
-            return resp.status, await resp.text()
+        url = self.base + path
+        hdrs = self._headers()
+        try:
+            if method == "GET":
+                async with sess.get(url, headers=hdrs, timeout=self.timeout) as resp:
+                    return resp.status, await resp.text()
+            if method == "POST":
+                if json_body is not None:
+                    async with sess.post(url, json=json_body, headers=hdrs, timeout=self.timeout) as resp:
+                        return resp.status, await resp.text()
+                async with sess.post(url, data=form_body, headers=hdrs, timeout=self.timeout) as resp:
+                    return resp.status, await resp.text()
+        except ClientError as exc:
+            raise RuntimeError(f"HTTP error {method} {url}: {exc}") from exc
+        return 599, ""  # should not happen
 
     # ---------------- CSRF retrieval ----------------
 
     async def _fetch_csrf(self, hass) -> Optional[str]:
-        """
-        Try both OS and legacy CSRF endpoints; accept token from header or JSON body.
-        """
+        """Try both OS and legacy CSRF endpoints; accept token from header or JSON body."""
         paths = (
             ["/api/auth/csrf", "/api/csrf"] if self._mode == "os"
             else ["/api/csrf", "/api/auth/csrf"] if self._mode == "legacy"
@@ -131,40 +134,41 @@ class UniFiClient:
 
     async def _login_once(self, hass, login_path: str, mode: str) -> bool:
         payload = {"username": self.user, "password": self.passwd}
-
-        # try JSON
+        # JSON
         try:
-            status, txt = await self._post_json(hass, login_path, payload, csrf=None)
-            _LOGGER.debug("UniFi login JSON %s -> %s body[:160]=%r", login_path, status, txt[:160])
-            if status == 200:
+            st, body = await self._request(hass, "POST", login_path, json_body=payload)
+            _LOGGER.debug("UniFi login JSON %s -> %s body[:160]=%r", login_path, st, body[:160])
+            if st == 200:
                 self._mode = mode
                 return True
-        except ClientError as exc:
+        except RuntimeError as exc:
             _LOGGER.debug("UniFi login JSON %s failed: %s", login_path, exc)
-
-        # try FORM (some very old builds)
+        # FORM (ancient)
         try:
-            status, txt = await self._post_form(hass, login_path, payload, csrf=None)
-            _LOGGER.debug("UniFi login FORM %s -> %s body[:160]=%r", login_path, status, txt[:160])
-            if status == 200:
+            st, body = await self._request(hass, "POST", login_path, form_body=payload)
+            _LOGGER.debug("UniFi login FORM %s -> %s body[:160]=%r", login_path, st, body[:160])
+            if st == 200:
                 self._mode = mode
                 return True
-        except ClientError as exc:
+        except RuntimeError as exc:
             _LOGGER.debug("UniFi login FORM %s failed: %s", login_path, exc)
-
         return False
 
     async def _login(self, hass) -> bool:
+        if self.token:
+            self._mode = "os"  # token is a UniFi OS concept; treat as OS mode
+            _LOGGER.debug("UniFi: using Bearer token auth")
+            return True
         if not (self.base and self.user and self.passwd):
-            _LOGGER.warning("UniFi: missing base/user/pass")
+            _LOGGER.warning("UniFi: missing base/user/pass and no token")
             return False
 
-        # Prefer UniFi OS first (443/4334 on UniFi OS)
+        # Prefer UniFi OS first
         if await self._login_once(hass, "/api/auth/login", "os"):
             _LOGGER.debug("UniFi: logged in via /api/auth/login")
             return True
 
-        # Legacy (common on 8443)
+        # Legacy
         if await self._login_once(hass, "/api/login", "legacy"):
             _LOGGER.debug("UniFi: logged in via /api/login")
             return True
@@ -173,16 +177,12 @@ class UniFiClient:
         return False
 
     async def _detect_api_root(self, hass) -> bool:
-        """
-        Must be called after _login() and (ideally) CSRF retrieval.
-        We probe /self/sites first; if that 401s, try hitting a data endpoint directly.
-        """
-        # 1) Normal probe
+        """Probe to find API root after auth + (ideally) CSRF."""
         for candidate in ("/proxy/network/api", "/api"):
             try:
-                status, txt = await self._get_any(hass, f"{candidate}/self/sites")
-                _LOGGER.debug("UniFi probe %s/self/sites -> %s", candidate, status)
-                if status == 200:
+                st, txt = await self._request(hass, "GET", f"{candidate}/self/sites")
+                _LOGGER.debug("UniFi probe %s/self/sites -> %s", candidate, st)
+                if st == 200:
                     try:
                         data = json.loads(txt)
                     except Exception:
@@ -191,24 +191,19 @@ class UniFiClient:
                         self._api_root = candidate
                         _LOGGER.debug("UniFi: selected API root %s", candidate)
                         return True
-            except ClientError as exc:
+            except RuntimeError as exc:
                 _LOGGER.debug("UniFi probe failed for %s: %s", candidate, exc)
 
-        # 2) Fallback: some legacy controllers won’t serve /self/sites without CSRF
-        # Try the data endpoints directly on /api
-        try_candidates = ["/api"]  # only legacy path makes sense here
-        for candidate in try_candidates:
-            try:
-                status_sta, _ = await self._get_any(hass, f"{candidate}/s/{self.site}/stat/sta")
-                status_dev, _ = await self._get_any(hass, f"{candidate}/s/{self.site}/stat/device")
-                _LOGGER.debug("UniFi direct probe %s stat/sta=%s stat/device=%s",
-                              candidate, status_sta, status_dev)
-                if status_sta == 200 or status_dev == 200:
-                    self._api_root = candidate
-                    _LOGGER.debug("UniFi: adopting API root %s via direct data probe", candidate)
-                    return True
-            except ClientError as exc:
-                _LOGGER.debug("UniFi direct data probe failed for %s: %s", candidate, exc)
+        # Fallback: some legacy controllers won’t serve /self/sites without CSRF
+        try:
+            st_sta, _ = await self._request(hass, "GET", f"/api/s/{self.site}/stat/sta")
+            st_dev, _ = await self._request(hass, "GET", f"/api/s/{self.site}/stat/device")
+            _LOGGER.debug("UniFi direct probe /api stat/sta=%s stat/device=%s", st_sta, st_dev)
+            if st_sta == 200 or st_dev == 200:
+                self._api_root = "/api"
+                return True
+        except RuntimeError as exc:
+            _LOGGER.debug("UniFi direct probe failed: %s", exc)
 
         return False
 
@@ -217,35 +212,43 @@ class UniFiClient:
             return True
         if not await self._login(hass):
             return False
-        # CSRF (controller may insist on this)
-        if not await self._fetch_csrf(hass):
-            _LOGGER.debug("UniFi: CSRF not obtained; controller may 401 on probes")
+        # CSRF (controllers often insist on it even with token)
+        await self._fetch_csrf(hass)
         if not await self._detect_api_root(hass):
             _LOGGER.error(
-                "UniFi: could not determine API root after login. "
-                "Check URL/port. Use the exact base that works in your browser (e.g. https://host:4334)."
+                "UniFi: could not determine API root after auth. "
+                "Check URL/port. Use the exact base that works in your browser."
             )
             return False
         _LOGGER.debug("UniFi ready: root=%s mode=%s site=%s", self._api_root, self._mode, self.site)
         return True
 
-    # ---------------- public API ----------------
-
-    async def _get_json_under_root(self, hass, path_under_root: str) -> Any:
+    async def _get_json_under_root(self, hass, path_under_root: str, *, _retry: bool = True) -> Any:
+        if not await self._ensure_ready(hass):
+            return []
         if not self._api_root:
             raise RuntimeError("UniFi: API root not determined")
-        status, txt = await self._get_any(hass, self._api_root + path_under_root)
-        _LOGGER.debug("UniFi GET %s -> %s body[:200]=%r", self._api_root + path_under_root, status, txt[:200])
-        if status >= 400:
-            raise RuntimeError(f"HTTP {status}: {txt[:200]!r}")
+        st, txt = await self._request(hass, "GET", self._api_root + path_under_root)
+        _LOGGER.debug("UniFi GET %s -> %s body[:200]=%r", self._api_root + path_under_root, st, txt[:200])
+        if st == 401 and _retry:
+            # Session expired / CSRF invalid: re-auth and retry once
+            _LOGGER.warning("UniFi: 401 on %s, attempting re-auth", path_under_root)
+            self._api_root = None
+            self._csrf = None
+            if await self._login(hass):
+                await self._fetch_csrf(hass)
+                await self._detect_api_root(hass)
+                return await self._get_json_under_root(hass, path_under_root, _retry=False)
+        if st >= 400:
+            raise RuntimeError(f"HTTP {st}: {txt[:200]!r}")
         try:
             return json.loads(txt)
         except Exception:
             raise RuntimeError(f"Non-JSON at {self._api_root + path_under_root}: {txt[:120]!r}")
 
+    # ---------------- public API ----------------
+
     async def fetch_clients(self, hass) -> list[dict]:
-        if not await self._ensure_ready(hass):
-            return []
         try:
             data = await self._get_json_under_root(hass, f"/s/{self.site}/stat/sta")
             rows = data.get("data", []) if isinstance(data, dict) else []
@@ -256,8 +259,6 @@ class UniFiClient:
             return []
 
     async def fetch_devices(self, hass) -> list[dict]:
-        if not await self._ensure_ready(hass):
-            return []
         try:
             data = await self._get_json_under_root(hass, f"/s/{self.site}/stat/device")
             rows = data.get("data", []) if isinstance(data, dict) else []
