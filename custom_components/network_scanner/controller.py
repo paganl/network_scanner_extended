@@ -382,6 +382,7 @@ class ScanController:
             if self._unifi_enabled and self._unifi_url and self._unifi_user and self._unifi_pass:
                 try:
                     uc = UniFiClient(self._unifi_url, self._unifi_user, self._unifi_pass,
+                                     token=self._opts.get("unifi_token",""),
                                      site=self._unifi_site, verify_tls=self._verify_tls)
                     clients = await uc.fetch_clients(self.hass)
                     devices = await uc.fetch_devices(self.hass)
