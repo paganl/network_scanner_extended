@@ -17,6 +17,8 @@ from .const import (
     CONF_PROVIDER, CONF_VERIFY_SSL,
     CONF_OPNSENSE_URL, CONF_UNIFI_URL, CONF_ADGUARD_URL,
     CONF_KEY, CONF_SECRET, CONF_NAME, CONF_PASSWORD, CONF_TOKEN,
+    DOMAIN,
+    DEFAULT_OPTIONS, CONF_INTERVAL_MIN,
 )
 
 from .provider import opnsense, unifi, adguard
