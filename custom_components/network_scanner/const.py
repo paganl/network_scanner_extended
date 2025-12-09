@@ -32,10 +32,10 @@ CONF_KEY          = "key"
 CONF_SECRET       = "secret"
 
 # UniFi (prefer token; else username/password)
-CONF_UNIFI_URL  = "unifi_url"
-CONF_TOKEN      = "token"
-CONF_NAME       = "username"   # generic username (kept for b/w compat)
-CONF_PASSWORD   = "password"   # generic password (kept for b/w compat)
+CONF_UNIFI_URL      = "unifi_url"
+CONF_UNIFI_TOKEN    = "token"
+CONF_NAME           = "username"   # generic username (kept for b/w compat)
+CONF_PASSWORD       = "password"   # generic password (kept for b/w compat)
 
 # AdGuard (username/password)
 CONF_ADGUARD_URL = "adguard_url"
