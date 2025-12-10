@@ -34,6 +34,7 @@ CONF_SECRET       = "secret"
 # UniFi (prefer token; else username/password)
 CONF_UNIFI_URL    = "unifi_url"
 CONF_UNIFI_TOKEN  = "token"
+CONF_UNIFI_SITE   = CONF_SITE    # backward-compat 
 CONF_TOKEN        = CONF_UNIFI_TOKEN # backwards-compat alias for coordinator
 CONF_NAME         = "username"   # generic username (kept for b/w compat)
 CONF_PASSWORD     = "password"   # generic password (kept for b/w compat)
