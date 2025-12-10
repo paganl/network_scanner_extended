@@ -49,10 +49,11 @@ class NetworkScannerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     VERSION = 1
 
-    def __init__(self, entry: config_entries.ConfigEntry) -> None:
-        self._entry = entry
-        base = dict(entry.options or entry.data or {})
-        self._opts: Dict[str, Any] = {**DEFAULT_OPTIONS, **base}
+    def __init__(self) -> None:
+        # No entry here – this is the initial config flow
+        self._entry: config_entries.ConfigEntry | None = None
+        # Start from defaults; we’ll fill this as we go through the steps
+        self._opts: Dict[str, Any] = dict(DEFAULT_OPTIONS)
 
     @staticmethod
     @callback
@@ -248,7 +249,11 @@ class NetworkScannerOptionsFlow(config_entries.OptionsFlow):
         self._entry = entry
         base = dict(entry.options or entry.data or {})
         self._opts: Dict[str, Any] = {**DEFAULT_OPTIONS, **base}
-
+    
+    async def _finish(self):
+        # In an OptionsFlow, async_create_entry(data=...) becomes entry.options
+        return self.async_create_entry(title="", data=self._opts)
+    
     async def async_step_init(self, user_input: Dict[str, Any] | None = None):
         return await self.async_step_user(user_input)
 
