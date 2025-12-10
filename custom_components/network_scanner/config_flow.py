@@ -246,7 +246,8 @@ class NetworkScannerOptionsFlow(config_entries.OptionsFlow):
 
     def __init__(self, entry: config_entries.ConfigEntry) -> None:
         self._entry = entry
-        self._opts: Dict[str, Any] = dict(entry.options or DEFAULT_OPTIONS)
+        base = dict(entry.options or entry.data or {})
+        self._opts: Dict[str, Any] = {**DEFAULT_OPTIONS, **base}
 
     async def async_step_init(self, user_input: Dict[str, Any] | None = None):
         return await self.async_step_user(user_input)
