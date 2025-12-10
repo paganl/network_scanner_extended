@@ -119,6 +119,12 @@ async def async_get_devices(
             # keep a provider block if you later want to stash raw fields
             # "adguard": {...}
         })
+    _LOGGER.info(
+        "AdGuard parsed %d DHCP leases, %d clients, %d merged devices",
+        len(leases),
+        len(clients),
+        len(out),
+    )        
     return out
 
 def _parse_dhcp(data: Any) -> List[Dict[str, Any]]:
