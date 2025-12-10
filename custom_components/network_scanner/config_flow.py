@@ -49,8 +49,10 @@ class NetworkScannerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     VERSION = 1
 
-    def __init__(self) -> None:
-        self._opts: Dict[str, Any] = dict(DEFAULT_OPTIONS)
+    def __init__(self, entry: config_entries.ConfigEntry) -> None:
+        self._entry = entry
+        base = dict(entry.options or entry.data or {})
+        self._opts: Dict[str, Any] = {**DEFAULT_OPTIONS, **base}
 
     @staticmethod
     @callback
