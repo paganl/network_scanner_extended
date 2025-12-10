@@ -48,7 +48,9 @@ class NetworkScannerCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         self.hass = hass
         self.entry = entry
-        self.options = {**DEFAULT_OPTIONS, **dict(entry.options)}
+        raw = dict(entry.options or entry.data or {})
+        self.options = {**DEFAULT_OPTIONS, **raw}
+
         self.session = async_get_clientsession(hass)
 
         interval_min = max(1, int(self.options.get(CONF_INTERVAL_MIN, 3)))
