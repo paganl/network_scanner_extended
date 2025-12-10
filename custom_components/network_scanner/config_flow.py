@@ -230,7 +230,13 @@ class NetworkScannerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         # Single entry; make re-adding idempotent
         await self.async_set_unique_id(DOMAIN)
         self._abort_if_unique_id_configured()
-        return self.async_create_entry(title="Network Scanner", data={}, options=self._opts)
+        # Store initial settings in data (not options) for HA versions
+        # that don't support options= in async_create_entry
+        return self.async_create_entry(
+            title="Network Scanner",
+            data=self._opts,
+        )
+
 
 
 class NetworkScannerOptionsFlow(config_entries.OptionsFlow):
@@ -364,5 +370,3 @@ class NetworkScannerOptionsFlow(config_entries.OptionsFlow):
 
         return self.async_show_form(step_id="opnsense_unifi", data_schema=vol.Schema(schema_dict))
 
-    async def _finish(self):
-        return self.async_create_entry(title="Network Scanner", data={}, options=self._opts)
