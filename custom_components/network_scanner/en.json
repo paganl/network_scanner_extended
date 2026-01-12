@@ -1,15 +1,26 @@
 {
-  "title": "Network Scanner Extended",
   "config": {
     "step": {
       "user": {
         "title": "Network Scanner Extended",
-        "description": "Enter the IP range and an optional MAC directory (JSON text or URL)."
+        "description": "Choose a presence provider (OPNsense ARP or AdGuard DHCP), optionally enable UniFi enrichment, and add directory overlay settings."
+      },
+      "opnsense": {
+        "title": "OPNsense presence provider"
+      },
+      "adguard": {
+        "title": "AdGuard presence provider"
+      },
+      "unifi": {
+        "title": "UniFi enrichment"
       }
     },
     "error": {
-      "invalid_json": "That JSON isn’t valid. Paste a JSON object (optionally with a top-level \"data\" object).",
-      "invalid_ip_range": "Please enter a valid CIDR range, e.g. 192.168.1.0/24."
+      "opnsense_url_required": "OPNsense URL is required.",
+      "opnsense_creds_required": "OPNsense key + secret are required.",
+      "adguard_url_required": "AdGuard URL is required.",
+      "unifi_url_required": "UniFi URL is required.",
+      "unifi_auth_required": "Provide a UniFi token or username + password."
     }
   }
 }
