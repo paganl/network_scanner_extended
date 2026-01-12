@@ -31,6 +31,7 @@ from .const import (
     # UniFi
     CONF_UNIFI_ENABLED, CONF_UNIFI_URL, CONF_UNIFI_USER, CONF_UNIFI_PASS, CONF_UNIFI_SITE,
     CONF_MAC_DIRECTORY_JSON_URL,
+    CONF_MAC_DIRECTORY_JSON_TEXT,
 )
 
 from .adguard import AdGuardDHCPClient
@@ -529,23 +530,22 @@ class ScanController:
             except Exception as exc:
                 _LOGGER.warning("Invalid directory JSON (options): %s", exc)
 
-        url = _norm(opts.get("CONF_MAC_DIRECTORY_JSON_URL") or self._entry.data.get("CONF_MAC_DIRECTORY_JSON_URL"))
+        url = _norm(opts.get(CONF_MAC_DIRECTORY_JSON_URL) or self._entry.data.get(CONF_MAC_DIRECTORY_JSON_URL))
         if url:
             try:
                 session = async_get_clientsession(self.hass, verify_ssl=self._verify_tls)
                 async with session.get(url, timeout=10) as resp:
                     text = await resp.text()
                     if resp.status >= 400:
-                        _LOGGER.warning("Directory URL fetch failed (%s): HTTP %s %.200s", url, resp.status, text)
+                        _LOGGER.warning("Directory URL HTTP %s (%s): %.200s", resp.status, url, text)
                     else:
                         try:
-                            obj = json.loads(text)
+                            parsed = _parse_dir_obj(json.loads(text))
                         except Exception as exc:
-                            _LOGGER.warning("Directory URL returned non-JSON (%s): %s %.200s", url, exc, text)
+                            _LOGGER.warning("Directory URL returned invalid JSON (%s): %s %.200s", url, exc, text)
                         else:
-                            parsed = _parse_dir_obj(obj)
                             out.update(parsed)
-                            _LOGGER.info("Directory URL loaded (%s): +%d entries (total %d)", url, len(parsed), len(out))
+                            _LOGGER.info("Directory URL loaded: +%d entries (total %d) from %s", len(parsed), len(out), url)
                             _LOGGER.debug("Directory URL sample MACs: %s", list(parsed.keys())[:5])
             except (ClientError, Exception) as exc:
                 _LOGGER.warning("Failed to fetch directory URL %s: %s", url, exc)
@@ -556,18 +556,20 @@ class ScanController:
             len(out),
             len(base) if isinstance(base, dict) else 0,
             "yes" if jtxt else "no",
-            "yes" if url else "no",
+            url or "none",
         )
         return out
 
     def _apply_directory_overrides(self, devices: List[dict], directory: Dict[str, Dict[str, str]]) -> None:
         applied = 0
         mac_missing = 0
+    
         for dev in devices:
             mac = _clean_mac(dev.get("mac", ""))
             if not mac:
                 mac_missing += 1
                 continue
+    
             override = directory.get(mac)
             if not override:
                 continue
@@ -583,9 +585,12 @@ class ScanController:
             applied += 1
             _LOGGER.debug(
                 "Directory override %s: name '%s'->'%s', type '%s'->'%s'",
-                mac, before_name, dev.get("name",""), before_type, dev.get("type","")
+                mac, before_name, dev.get("name", ""), before_type, dev.get("type", "")
             )
     
-        _LOGGER.info("Directory overrides applied: %d (devices=%d, mac_missing=%d, dir_entries=%d)",
-                     applied, len(devices), mac_missing, len(directory))
+        _LOGGER.info(
+            "Directory overrides: applied=%d devices=%d mac_missing=%d dir_entries=%d",
+            applied, len(devices), mac_missing, len(directory)
+        )
+
 
