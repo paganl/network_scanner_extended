@@ -1,0 +1,36 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Network Scanner",
+        "description": "Choose provider and common options"
+      },
+      "opnsense": {
+        "title": "OPNsense",
+        "description": "Configure OPNsense connection"
+      },
+      "unifi": {
+        "title": "UniFi",
+        "description": "Configure UniFi controller connection"
+      },
+      "adguard": {
+        "title": "AdGuard Home",
+        "description": "Configure AdGuard Home connection"
+      },
+      "opnsense_unifi": {
+        "title": "OPNsense + UniFi",
+        "description": "Configure both OPNsense and UniFi"
+      }
+    },
+    "error": {
+      "opnsense_url_required": "OPNsense URL is required",
+      "opnsense_creds_required": "OPNsense key and secret are required",
+      "unifi_url_required": "UniFi URL is required",
+      "unifi_auth_required": "Provide a token or username and password",
+      "adguard_url_required": "AdGuard URL is required",
+      "opnsense_unifi_opnsense_required": "OPNsense URL/key/secret are required",
+      "opnsense_unifi_unifi_url_required": "UniFi URL is required",
+      "opnsense_unifi_unifi_auth_required": "Provide a UniFi token or username and password"
+    }
+  }
+}
