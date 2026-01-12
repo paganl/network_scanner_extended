@@ -1,28 +1,22 @@
-# custom_components/network_scanner/sensor.py
 from __future__ import annotations
-
-from typing import Any
 
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities):
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities) -> None:
     coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
-    async_add_entities([NetworkScannerSummarySensor(coordinator, entry)], True)
+    async_add_entities([NetworkScannerSensor(coordinator, entry)], True)
 
 
-class NetworkScannerSummarySensor(CoordinatorEntity, SensorEntity):
-    _attr_has_entity_name = True
-    _attr_name = "Summary"
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
+class NetworkScannerSensor(CoordinatorEntity, SensorEntity):
     _attr_icon = "mdi:lan"
-    _attr_native_unit_of_measurement = "devices"
+    _attr_has_entity_name = True
+    _attr_name = "Network Scanner"
 
     def __init__(self, coordinator, entry: ConfigEntry) -> None:
         super().__init__(coordinator)
@@ -30,25 +24,19 @@ class NetworkScannerSummarySensor(CoordinatorEntity, SensorEntity):
         self._attr_unique_id = f"{entry.entry_id}:summary"
 
     @property
-    def native_value(self) -> int:
-        data = self.coordinator.data or {}
-        return int(data.get("device_count_total", 0))
+    def native_value(self):
+        meta = (self.coordinator.data or {}).get("meta") or {}
+        return int(meta.get("count") or 0)
 
     @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        """Keep attributes SMALL — this is what fixes the 16KB warning."""
-        d = self.coordinator.data or {}
+    def extra_state_attributes(self):
+        meta = (self.coordinator.data or {}).get("meta") or {}
+        # keep it SMALL
         return {
-            "status": d.get("status", "unknown"),
-            "presence_provider": d.get("presence_provider", ""),
-            "unifi_enabled": bool(d.get("unifi_enabled", False)),
-            "device_count_total": int(d.get("device_count_total", 0)),
-            "device_count_new": int(d.get("device_count_new", 0)),
-            "device_count_random_mac": int(d.get("device_count_random_mac", 0)),
-            "device_count_stale": int(d.get("device_count_stale", 0)),
-            "last_scan_started": d.get("last_scan_started"),
-            "last_scan_finished": d.get("last_scan_finished"),
-            "duration_ms": int(d.get("duration_ms", 0)),
-            "error_count": int(d.get("error_count", 0)),
-            "last_error": d.get("last_error", ""),
+            "new_count": int(meta.get("new_count") or 0),
+            "random_count": int(meta.get("random_count") or 0),
+            "stale_count": int(meta.get("stale_count") or 0),
+            "last_refresh_utc": meta.get("last_refresh_utc"),
+            "providers": meta.get("providers") or [],
+            "errors": meta.get("errors") or {},
         }
