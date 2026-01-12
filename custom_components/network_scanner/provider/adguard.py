@@ -1,8 +1,9 @@
 from __future__ import annotations
 import logging
 import re
+import ipaddress
 from typing import Any, Dict, List
-from aiohttp import ClientSession, ClientTimeout
+from aiohttp import ClientSession, ClientTimeout, BasicAuth
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -13,7 +14,16 @@ def _is_mac(s: str | None) -> bool:
 
 def _norm_mac(s: str | None) -> str:
     return (s or "").upper()
-
+    
+def _is_ip(s: str | None) -> bool:
+    if not s:
+        return False
+    try:
+        ipaddress.ip_address(s)
+        return True
+    except ValueError:
+        return False
+        
 async def async_get_devices(
     session: ClientSession,
     base_url: str,
@@ -32,11 +42,13 @@ async def async_get_devices(
     base = base_url.rstrip("/")
     tmo = ClientTimeout(total=timeout_s)
 
+    auth = BasicAuth(username, password) if username and password else None
+    
     token = None
     # Try to get a token; many setups have auth disabled so this can fail
     try:
         payload = {"name": username or "admin", "password": password or ""}
-        async with session.post(f"{base}/control/login", json=payload, timeout=tmo, ssl=verify_ssl) as r:
+        async with session.post(f"{base}/control/login", json=payload, timeout=tmo, ssl=verify_ssl,auth=auth,) as r:
             if r.status == 200:
                 data = await r.json()
                 token = (data or {}).get("token")
@@ -55,7 +67,7 @@ async def async_get_devices(
     # Prefer direct leases endpoint; some versions also expose dhcp/status
     for path in ("/control/dhcp/leases", "/control/dhcp/status"):
         try:
-            async with session.get(f"{base}{path}", headers=headers, timeout=tmo, ssl=verify_ssl) as r:
+            async with session.get(f"{base}{path}", headers=headers, timeout=tmo, ssl=verify_ssl, auth=auth,) as r:
                 if r.status != 200:
                     _LOGGER.debug("AdGuard GET %s -> HTTP %s", path, r.status)
                     continue
@@ -69,7 +81,7 @@ async def async_get_devices(
 
     # Clients (can contain MACs even without DHCP service enabled)
     try:
-        async with session.get(f"{base}/control/clients", headers=headers, timeout=tmo, ssl=verify_ssl) as r:
+        async with session.get(f"{base}/control/clients", headers=headers, timeout=tmo, ssl=verify_ssl,auth=auth,) as r:
             if r.status == 200:
                 data = await r.json()
                 clients = _parse_clients(data)
@@ -170,12 +182,19 @@ def _parse_clients(data: Any) -> List[Dict[str, Any]]:
             continue
         ids = it.get("ids") or []
         mac = ""
+        ip = ""
+        
         if isinstance(ids, list):
             # pick the first thing that looks like a MAC
             for ident in ids:
-                if _is_mac(str(ident)):
-                    mac = _norm_mac(ident)
+                s = str(ident)
+                if not mac and _is_mac(s):
+                    mac = _norm_mac(s)
+                elif not ip and _is_ip(s):
+                    ip = s
+                if mac and ip:
                     break
+                    
         host = it.get("name") or it.get("hostname") or ""
         ip = ""
         # 'ip' can be a list or a string depending on version
