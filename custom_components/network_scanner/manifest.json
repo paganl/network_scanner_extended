@@ -1,7 +1,7 @@
 {
   "domain": "network_scanner",
   "name": "Network Scanner Extended (Lean)",
-  "version": "0.30.3",
+  "version": "0.30.4",
   "documentation": "https://example.invalid/network_scanner_docs",
   "issue_tracker": "https://example.invalid/network_scanner_issues",
   "iot_class": "local_polling",
