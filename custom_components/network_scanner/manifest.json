@@ -8,7 +8,6 @@
   "integration_type": "service",
   "codeowners": [
     "@paganl",
-    "@openai-helper"
   ],
   "config_flow": true,
   "requirements": [],
