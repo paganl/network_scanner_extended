@@ -534,21 +534,58 @@ class ScanController:
             try:
                 session = async_get_clientsession(self.hass, verify_ssl=self._verify_tls)
                 async with session.get(url, timeout=10) as resp:
-                    resp.raise_for_status()
-                    out.update(_parse_dir_obj(json.loads(await resp.text())))
+                    text = await resp.text()
+                    if resp.status >= 400:
+                        _LOGGER.warning("Directory URL fetch failed (%s): HTTP %s %.200s", url, resp.status, text)
+                    else:
+                        try:
+                            obj = json.loads(text)
+                        except Exception as exc:
+                            _LOGGER.warning("Directory URL returned non-JSON (%s): %s %.200s", url, exc, text)
+                        else:
+                            parsed = _parse_dir_obj(obj)
+                            out.update(parsed)
+                            _LOGGER.info("Directory URL loaded (%s): +%d entries (total %d)", url, len(parsed), len(out))
+                            _LOGGER.debug("Directory URL sample MACs: %s", list(parsed.keys())[:5])
             except (ClientError, Exception) as exc:
                 _LOGGER.warning("Failed to fetch directory URL %s: %s", url, exc)
+
+        
+        _LOGGER.info(
+            "MAC directory loaded: %d entries (data=%d, options_text=%s, url=%s)",
+            len(out),
+            len(base) if isinstance(base, dict) else 0,
+            "yes" if jtxt else "no",
+            "yes" if url else "no",
+        )
         return out
 
     def _apply_directory_overrides(self, devices: List[dict], directory: Dict[str, Dict[str, str]]) -> None:
+        applied = 0
+        mac_missing = 0
         for dev in devices:
             mac = _clean_mac(dev.get("mac", ""))
             if not mac:
+                mac_missing += 1
                 continue
             override = directory.get(mac)
             if not override:
                 continue
+    
+            before_name = dev.get("name", "")
+            before_type = dev.get("type", "")
+    
             if override.get("name"):
                 dev["name"] = override["name"]
             if override.get("desc"):
                 dev["type"] = override["desc"]
+    
+            applied += 1
+            _LOGGER.debug(
+                "Directory override %s: name '%s'->'%s', type '%s'->'%s'",
+                mac, before_name, dev.get("name",""), before_type, dev.get("type","")
+            )
+    
+        _LOGGER.info("Directory overrides applied: %d (devices=%d, mac_missing=%d, dir_entries=%d)",
+                     applied, len(devices), mac_missing, len(directory))
+
