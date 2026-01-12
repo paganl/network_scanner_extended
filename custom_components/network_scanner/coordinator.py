@@ -74,6 +74,18 @@ class NetworkScannerCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         self._store = Store(hass, STORE_VERSION, f"{DOMAIN}_inventory_{entry.entry_id}")
         self._inventory: Dict[str, Dict[str, Any]] | None = None  # key -> stored record
 
+    def device_uids(self) -> list[str]:
+        """Return stable IDs for devices currently present (used for cleanup)."""
+        devices = (self.data or {}).get("devices", [])
+        out: list[str] = []
+        for d in devices:
+            mac = (d.get("mac") or "").upper()
+            if mac:
+                out.append(mac)
+            elif d.get("ips"):
+                out.append(f"IP:{d['ips'][0]}")
+        return out
+    
     def _build_views(self, merged: list[dict]) -> dict:
         flat = []
         idx_mac: dict[str, int] = {}
