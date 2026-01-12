@@ -30,6 +30,7 @@ from .const import (
     DEFAULT_OPTIONS,
     # optional (if you have it in const.py; otherwise remove these two lines)
     CONF_UNIFI_SITE,
+    CONF_MAC_DIRECTORY_JSON_URL,
 )
 
 PROVIDER_CHOICES = [
@@ -68,6 +69,7 @@ class NetworkScannerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._opts[CONF_PROVIDER] = user_input[CONF_PROVIDER]
             self._opts[CONF_VERIFY_SSL] = bool(user_input.get(CONF_VERIFY_SSL, False))
             self._opts[CONF_INTERVAL_MIN] = max(1, int(user_input.get(CONF_INTERVAL_MIN, 3)))
+            self._opts[CONF_MAC_DIRECTORY_JSON_URL] = (user_input.get(CONF_MAC_DIRECTORY_JSON_URL) or "").strip()
 
             prov = self._opts[CONF_PROVIDER]
             if prov == PROVIDER_OPNSENSE:
@@ -87,6 +89,7 @@ class NetworkScannerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 ): vol.In(PROVIDER_CHOICES),
                 vol.Optional(CONF_VERIFY_SSL, default=self._opts.get(CONF_VERIFY_SSL, False)): bool,
                 vol.Optional(CONF_INTERVAL_MIN, default=self._opts.get(CONF_INTERVAL_MIN, 3)): int,
+                vol.Optional(CONF_MAC_DIRECTORY_JSON_URL, default=self._opts.get(CONF_MAC_DIRECTORY_JSON_URL, "")): str,
             }
         )
         return self.async_show_form(step_id="user", data_schema=schema)
