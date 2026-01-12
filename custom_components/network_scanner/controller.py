@@ -29,7 +29,7 @@ from .const import (
     # AdGuard
     CONF_ADG_URL, CONF_ADG_USER, CONF_ADG_PASS,
     # UniFi
-    CONF_UNIFI_ENABLED, CONF_UNIFI_URL, CONF_UNIFI_USER, CONF_UNIFI_PASS, CONF_UNIFI_SITE,
+    CONF_UNIFI_ENABLED, CONF_UNIFI_URL, CONF_UNIFI_USER, CONF_UNIFI_PASS, CONF_UNIFI_SITE, CONF_UNIFI_TOKEN,
     CONF_MAC_DIRECTORY_JSON_URL,
     CONF_MAC_DIRECTORY_JSON_TEXT,
 )
@@ -383,8 +383,6 @@ class ScanController:
             # ---------- UniFi enrichment (independent) ----------
             if self._unifi_enabled and self._unifi_url and self._unifi_user and self._unifi_pass:
                 try:
-                    self._unifi_token = _norm(opts.get(CONF_UNIFI_TOKEN) or data.get(CONF_UNIFI_TOKEN))
-
                     uc = UniFiClient(self._unifi_url, self._unifi_user, self._unifi_pass,
                                      token=self._unifi_token,
                                      site=self._unifi_site, verify_tls=self._verify_tls)
