@@ -5,10 +5,8 @@
   "documentation": "https://example.invalid/network_scanner_docs",
   "issue_tracker": "https://example.invalid/network_scanner_issues",
   "iot_class": "local_polling",
-  "integration_type": "service",
-  "codeowners": [
-    "@paganl"
-  ],
+  "integration_type": "hub",
+  "codeowners": ["@paganl"],
   "config_flow": true,
   "requirements": []
 }
