@@ -223,6 +223,7 @@ class ScanController:
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         self.hass = hass
         self._entry = entry
+        self._unifi_token: str = ""
 
         self._devices: List[Dict[str, Any]] = []
         self._device_count: int = 0
@@ -300,6 +301,7 @@ class ScanController:
         self._opn_key = _norm(opts.get("opnsense_key") or data.get("opnsense_key"))
         self._opn_sec = _norm(opts.get("opnsense_secret") or data.get("opnsense_secret"))
         self._opn_iface = _norm(opts.get("opnsense_interface") or data.get("opnsense_interface"))
+        self._unifi_token = _norm(opts.get(CONF_UNIFI_TOKEN) or data.get(CONF_UNIFI_TOKEN))
 
         # AdGuard
         self._adg_url  = _norm(opts.get(CONF_ADG_URL)  or data.get(CONF_ADG_URL))
@@ -383,9 +385,15 @@ class ScanController:
             # ---------- UniFi enrichment (independent) ----------
             if self._unifi_enabled and self._unifi_url and self._unifi_user and self._unifi_pass:
                 try:
-                    uc = UniFiClient(self._unifi_url, self._unifi_user, self._unifi_pass,
-                                     token=self._unifi_token,
-                                     site=self._unifi_site, verify_tls=self._verify_tls)
+                    uc = UniFiClient(
+                        self._unifi_url,
+                        self._unifi_user,
+                        self._unifi_pass,
+                        token=self._unifi_token,
+                        site=self._unifi_site,
+                        verify_tls=self._verify_tls,
+)
+
                     clients = await uc.fetch_clients(self.hass)
                     devices = await uc.fetch_devices(self.hass)
                     ap_name = {}
