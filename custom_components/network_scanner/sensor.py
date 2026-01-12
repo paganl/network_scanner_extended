@@ -9,7 +9,8 @@ from .const import DOMAIN
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities) -> None:
-    coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
+    blob = hass.data[DOMAIN][entry.entry_id]
+    coordinator = blob["coordinator"] if isinstance(blob, dict) else blob
     async_add_entities([NetworkScannerSensor(coordinator, entry)], True)
 
 
