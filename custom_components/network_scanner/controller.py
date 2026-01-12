@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import json
 import logging
 import re
+import os
 from datetime import datetime, timezone
 from ipaddress import ip_network, ip_address
 
@@ -37,7 +38,9 @@ from .const import (
 from .adguard import AdGuardDHCPClient
 from .unifi import UniFiClient
 
-_LOGGER = logging.getLogger(__name__)
+
+logging.getLogger(__name__).warning("MARKER C: coordinator.py imported from %s", os.path.abspath(__file__))
+
 
 # ---------------- helpers ----------------
 
