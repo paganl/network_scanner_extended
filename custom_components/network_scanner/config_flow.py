@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 import voluptuous as vol
+import logging
+_LOGGER = logging.getLogger(__name__)
 
 from homeassistant import config_entries
 from homeassistant.core import callback
@@ -97,6 +99,13 @@ class NetworkScannerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
             }
         )
+        _LOGGER.debug(
+            "Showing step_user. Defaults: url='%s' text_len=%d provider=%s",
+            self._opts.get(CONF_MAC_DIRECTORY_JSON_URL, ""),
+            len(self._opts.get(CONF_MAC_DIRECTORY_JSON_TEXT, "") or ""),
+            self._opts.get(CONF_PROVIDER),
+        )
+
         return self.async_show_form(step_id="user", data_schema=schema)
 
     # ------------------- provider steps -------------------
@@ -297,6 +306,13 @@ class NetworkScannerOptionsFlow(config_entries.OptionsFlow):
 
             }
         )
+        _LOGGER.debug(
+            "Showing step_user. Defaults: url='%s' text_len=%d provider=%s",
+            self._opts.get(CONF_MAC_DIRECTORY_JSON_URL, ""),
+            len(self._opts.get(CONF_MAC_DIRECTORY_JSON_TEXT, "") or ""),
+            self._opts.get(CONF_PROVIDER),
+        )
+
         return self.async_show_form(step_id="user", data_schema=schema)
 
     async def async_step_opnsense(self, user_input: Dict[str, Any] | None = None):
