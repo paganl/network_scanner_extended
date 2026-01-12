@@ -1,18 +1,15 @@
 {
   "domain": "network_scanner",
   "name": "Network Scanner Extended (Lean)",
-  "version": "0.21.0",
+  "version": "0.30.0",
   "documentation": "https://example.invalid/network_scanner_docs",
   "issue_tracker": "https://example.invalid/network_scanner_issues",
   "iot_class": "local_polling",
-  "integration_type": "hub",
+  "integration_type": "service",
   "codeowners": [
     "@paganl",
     "@openai-helper"
   ],
   "config_flow": true,
   "requirements": [],
-  "loggers": [
-    "custom_components.network_scanner"
-  ]
 }
