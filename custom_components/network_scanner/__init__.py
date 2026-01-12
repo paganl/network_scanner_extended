@@ -16,7 +16,13 @@ from .const import (
     CONF_PROVIDER, CONF_OPNSENSE_URL, CONF_UNIFI_URL, CONF_ADGUARD_URL,
 )
 
+import logging
+_LOGGER = logging.getLogger(__name__)
+_LOGGER.warning("network_scanner LOADED FROM custom_components (v0.20b.0) - marker A")
+
+
 PLATFORMS: list[str] = ["sensor"]
+
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     # Keep import-time side effects to a minimum
