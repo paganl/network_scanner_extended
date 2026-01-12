@@ -51,7 +51,7 @@ DEFAULT_OPTIONS = {
 EVENT_RANDOM_MAC_DETECTED = f"{DOMAIN}_random_mac_detected"
 EVENT_NEW_DEVICE_DETECTED = f"{DOMAIN}_new_device_detected"
 
-SERVICE_RESCan = "rescan"
+SERVICE_RESCAN = "rescan"
 SERVICE_CLEANUP = "cleanup_entities"
 
 # ---- Internal ----
