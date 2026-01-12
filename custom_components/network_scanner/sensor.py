@@ -8,6 +8,10 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 
+import os
+import logging
+logging.getLogger(__name__).warning("MARKER S: sensor.py imported from %s", os.path.abspath(__file__))
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities):
     coordinator = hass.data[DOMAIN][entry.entry_id]
     async_add_entities([NetworkScannerSensor(coordinator, entry)], update_before_add=True)
