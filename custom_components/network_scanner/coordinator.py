@@ -14,12 +14,19 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .const import (
-    CONF_PROVIDERS, CONF_VERIFY_SSL,
-    CONF_OPNSENSE_URL, CONF_UNIFI_URL, CONF_ADGUARD_URL,
-    CONF_KEY, CONF_SECRET, CONF_NAME, CONF_PASSWORD, CONF_TOKEN,
     DOMAIN,
-    DEFAULT_OPTIONS, CONF_INTERVAL_MIN,
+    DEFAULT_OPTIONS,
+    CONF_PROVIDERS,
+    CONF_VERIFY_SSL,
+    CONF_INTERVAL_MIN,
+    # OPNsense
+    CONF_OPNSENSE_URL, CONF_KEY, CONF_SECRET,
+    # UniFi
+    CONF_UNIFI_URL, CONF_UNIFI_TOKEN, CONF_UNIFI_USER, CONF_UNIFI_PASS, CONF_UNIFI_SITE,
+    # AdGuard
+    CONF_ADGUARD_URL, CONF_ADGUARD_USER, CONF_ADGUARD_PASS,
 )
+
 
 from .provider import opnsense, unifi, adguard
 
@@ -235,64 +242,48 @@ class NetworkScannerCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             raise UpdateFailed(str(exc)) from exc
 
     async def _collect_raw_devices(self) -> Dict[str, List[Dict[str, Any]]]:
-        """Collect lists from providers; keys are provider names."""
-        prov = self.options.get(CONF_PROVIDER, "opnsense")
-        verify = bool(self.options.get(CONF_VERIFY_SSL, False))
-
-        # Helper: resolve URLs
-        def _u(kind: str) -> str:
-            if kind == "opnsense": return (self.options.get(CONF_OPNSENSE_URL) or "").rstrip("/")
-            if kind == "unifi":    return (self.options.get(CONF_UNIFI_URL) or "").rstrip("/")
-            if kind == "adguard":  return (self.options.get(CONF_ADGUARD_URL) or "").rstrip("/")
-            return ""
-
+        """Collect device lists from enabled providers; keys are provider names."""
+        providers = self.options.get(CONF_PROVIDERS) or []
+        providers = list(providers) if isinstance(providers, (list, set, tuple)) else [providers]
+    
+        verify = bool(self.options.get(CONF_VERIFY_SSL, True))
+    
+        def _rstrip(v: str) -> str:
+            return (v or "").strip().rstrip("/")
+    
         out: Dict[str, List[Dict[str, Any]]] = {}
-
-        if prov == "opnsense":
+    
+        if "opnsense" in providers:
             out["opnsense"] = await opnsense.async_get_devices(
                 session=self.session,
-                base_url=_u("opnsense"),
-                key=self.options.get(CONF_KEY, ""),
-                secret=self.options.get(CONF_SECRET, ""),
+                base_url=_rstrip(self.options.get(CONF_OPNSENSE_URL, "")),
+                key=(self.options.get(CONF_KEY) or "").strip(),
+                secret=(self.options.get(CONF_SECRET) or "").strip(),
                 verify_ssl=verify,
             )
-        elif prov == "unifi":
+    
+        if "unifi" in providers:
             out["unifi"] = await unifi.async_get_devices(
                 session=self.session,
-                base_url=_u("unifi"),
-                username=self.options.get(CONF_NAME, ""),
-                password=self.options.get(CONF_PASSWORD, ""),
-                token=self.options.get(CONF_TOKEN, ""),
+                base_url=_rstrip(self.options.get(CONF_UNIFI_URL, "")),
+                token=(self.options.get(CONF_UNIFI_TOKEN) or "").strip(),
+                username=(self.options.get(CONF_UNIFI_USER) or "").strip(),
+                password=(self.options.get(CONF_UNIFI_PASS) or "").strip(),
+                site=(self.options.get(CONF_UNIFI_SITE) or "default").strip(),
                 verify_ssl=verify,
             )
-        elif prov == "adguard":
+    
+        if "adguard" in providers:
             out["adguard"] = await adguard.async_get_devices(
                 session=self.session,
-                base_url=_u("adguard"),
-                username=self.options.get(CONF_NAME, ""),
-                password=self.options.get(CONF_PASSWORD, ""),
+                base_url=_rstrip(self.options.get(CONF_ADGUARD_URL, "")),
+                username=(self.options.get(CONF_ADGUARD_USER) or "").strip(),
+                password=(self.options.get(CONF_ADGUARD_PASS) or "").strip(),
                 verify_ssl=verify,
             )
-        elif prov == "opnsense_unifi":
-            out["opnsense"] = await opnsense.async_get_devices(
-                session=self.session,
-                base_url=_u("opnsense"),
-                key=self.options.get(CONF_KEY, ""),
-                secret=self.options.get(CONF_SECRET, ""),
-                verify_ssl=verify,
-            )
-            out["unifi"] = await unifi.async_get_devices(
-                session=self.session,
-                base_url=_u("unifi"),
-                username=self.options.get(CONF_NAME, ""),
-                password=self.options.get(CONF_PASSWORD, ""),
-                token=self.options.get(CONF_TOKEN, ""),
-                verify_ssl=verify,
-            )
-        else:
-            _LOGGER.warning("Unknown provider %s", prov)
-
+    
         return out
+
 
     # ---------------- merge + derive ----------------
 
