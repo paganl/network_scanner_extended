@@ -17,7 +17,7 @@ _LOGGER = logging.getLogger(__name__)
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities) -> None:
     blob = hass.data[DOMAIN][entry.entry_id]
-    coordinator = blob["coordinator"]
+    coordinator = blob["coordinator"] if isinstance(blob, dict) else blob
     known = blob["known_tracker_ids"]
 
     @callback
