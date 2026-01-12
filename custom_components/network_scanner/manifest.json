@@ -10,5 +10,5 @@
     "@paganl"
   ],
   "config_flow": true,
-  "requirements": [],
+  "requirements": []
 }
