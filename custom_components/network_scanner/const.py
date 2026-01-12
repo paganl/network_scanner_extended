@@ -24,15 +24,15 @@ CONF_SECRET = "secret"
 
 # UniFi
 CONF_UNIFI_URL = "unifi_url"
-CONF_UNIFI_TOKEN = "token"
-CONF_UNIFI_USER = "username"
-CONF_UNIFI_PASS = "password"
+CONF_UNIFI_TOKEN = "unifi_token"
+CONF_UNIFI_USER  = "unifi_username"
+CONF_UNIFI_PASS  = "unifi_password"
 CONF_UNIFI_SITE = "site"
 
 # AdGuard
 CONF_ADGUARD_URL = "adguard_url"
-CONF_ADGUARD_USER = "username"
-CONF_ADGUARD_PASS = "password"
+CONF_ADGUARD_USER = "adguard_username"
+CONF_ADGUARD_PASS = "adguard_password"
 
 # Directory overlay
 CONF_MAC_DIRECTORY_JSON_URL = "mac_directory_json_url"
