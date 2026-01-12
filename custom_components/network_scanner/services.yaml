@@ -1,7 +1,42 @@
+# custom_components/network_scanner/services.yaml
+scan_now:
+  name: Scan now
+  description: Trigger an immediate scan refresh for a specific config entry.
+  fields:
+    config_entry_id:
+      name: Config entry id
+      description: The config entry id for the Network Scanner integration instance.
+      required: true
+      selector:
+        text: {}
 
-refresh:
-  name: Manual refresh
-  description: Request an immediate refresh from the configured provider.
-run_nmap:
-  name: Run nmap enrichment
-  description: If enabled in options, run a single nmap scan to enrich host cache.
+cleanup:
+  name: Cleanup device_trackers
+  description: Remove device_tracker entities created by this integration.
+  fields:
+    config_entry_id:
+      name: Config entry id
+      description: The config entry id for the Network Scanner integration instance.
+      required: true
+      selector:
+        text: {}
+    mode:
+      name: Mode
+      description: all | random_only | stale_only
+      required: false
+      selector:
+        select:
+          options:
+            - all
+            - random_only
+            - stale_only
+    older_than_days:
+      name: Older than days
+      description: Only used for stale_only mode.
+      required: false
+      default: 14
+      selector:
+        number:
+          min: 1
+          max: 365
+          mode: box
