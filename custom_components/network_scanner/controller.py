@@ -236,7 +236,15 @@ class ScanController:
 
         self._cidr_strings: List[str] = []
         self._cidr_nets: List[Tuple[str, object]] = []
-        self._scan_interval_minutes: int = DEFAULT_SCAN_INTERVAL_MINUTES
+        self._scan_interval_minutes = int(
+            opts.get("scan_interval_minutes",
+                opts.get("interval_min",
+                    data.get("scan_interval_minutes",
+                        data.get("interval_min", DEFAULT_SCAN_INTERVAL_MINUTES)
+                    )
+                )
+            )
+        )
         self._arp_provider: str = ARP_PROVIDER_NONE
 
         # OPNsense
