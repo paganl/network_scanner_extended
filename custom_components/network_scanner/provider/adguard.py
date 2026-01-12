@@ -67,7 +67,7 @@ async def async_get_devices(
             json=payload,
             timeout=tmo,
             ssl=verify_ssl,
-            # Don’t send BasicAuth to login; it can trigger 403 on some setups.
+            auth=proxy_auth,
         ) as r:
             if r.status == 200:
                 data = await r.json()
