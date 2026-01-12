@@ -32,7 +32,7 @@ def _rstrip_url(v: Optional[str]) -> str:
     return (v or "").strip().rstrip("/")
 
 
-class NetworkScannerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
+class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
 
     def __init__(self) -> None:
