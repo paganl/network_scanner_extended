@@ -9,7 +9,7 @@ from homeassistant.helpers import entity_registry as er
 
 from .const import (
     DOMAIN,
-    SERVICE_RESCan,
+    SERVICE_RESCAN,
     SERVICE_CLEANUP,
 )
 
@@ -42,8 +42,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await _cleanup_orphaned_trackers(hass, entry)
 
     # Register services once per HA instance
-    if not hass.services.has_service(DOMAIN, SERVICE_RESCan):
-        hass.services.async_register(DOMAIN, SERVICE_RESCan, _svc_rescan)
+    if not hass.services.has_service(DOMAIN, SERVICE_RESCAN):
+        hass.services.async_register(DOMAIN, SERVICE_RESCAN, _svc_rescan)
     if not hass.services.has_service(DOMAIN, SERVICE_CLEANUP):
         hass.services.async_register(DOMAIN, SERVICE_CLEANUP, _svc_cleanup)
 
