@@ -1,128 +1,108 @@
-# custom_components/network_scanner/device_tracker.py
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
-from homeassistant.components.device_tracker import SourceType
-from homeassistant.components.device_tracker.config_entry import TrackerEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.components.device_tracker.config_entry import TrackerEntity
+from homeassistant.components.device_tracker.const import SourceType
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers import entity_registry as er
 
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
 
-async def async_setup_entry(
-    hass: HomeAssistant,
-    entry: ConfigEntry,
-    async_add_entities: AddEntitiesCallback,
-):
-    coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities) -> None:
+    blob = hass.data[DOMAIN][entry.entry_id]
+    coordinator = blob["coordinator"]
+    known = blob["known_tracker_ids"]
 
-    added: set[str] = set()
-
-    def _current_keys():
-        return list((coordinator.devices_by_key or {}).keys())
-
-    # Add existing right away (after first refresh)
-    entities = []
-    for key in _current_keys():
-        entities.append(NetworkScannerDeviceTracker(coordinator, entry, key))
-        added.add(key)
-
-    async_add_entities(entities, True)
-
-    # Add new entities dynamically when new devices appear
     @callback
-    def _handle_update():
-        keys = set(_current_keys())
-        new_keys = keys - added
-        if not new_keys:
-            return
-        new_entities = [NetworkScannerDeviceTracker(coordinator, entry, k) for k in sorted(new_keys)]
-        for k in new_keys:
-            added.add(k)
-        async_add_entities(new_entities, True)
+    def _add_new_entities() -> None:
+        devs = (coordinator.data or {}).get("devices") or []
+        new_ents = []
+        for d in devs:
+            uid = d.get("uid")
+            if not uid or uid in known:
+                continue
+            known.add(uid)
+            new_ents.append(NetworkScannerTracker(coordinator, entry, uid))
+        if new_ents:
+            async_add_entities(new_ents)
 
-    coordinator.async_add_listener(_handle_update)
+    # initial add
+    _add_new_entities()
+    # add on updates
+    coordinator.async_add_listener(_add_new_entities)
 
 
-class NetworkScannerDeviceTracker(CoordinatorEntity, TrackerEntity):
-    """One device_tracker per discovered device."""
+class NetworkScannerTracker(CoordinatorEntity, TrackerEntity):
+    _attr_has_entity_name = True
+    _attr_icon = "mdi:access-point-network"
 
-    def __init__(self, coordinator, entry: ConfigEntry, key: str) -> None:
+    def __init__(self, coordinator, entry: ConfigEntry, uid: str) -> None:
         super().__init__(coordinator)
         self._entry = entry
-        self._key = key
-        self._attr_unique_id = f"{entry.entry_id}:{key}"
-        # Friendly name can still be overridden by entity_registry
-        self._attr_name = key
+        self._uid = uid
+        self._attr_unique_id = f"{entry.entry_id}:{uid}"
+
+    def _dev(self) -> Optional[Dict[str, Any]]:
+        devs = (self.coordinator.data or {}).get("devices") or []
+        for d in devs:
+            if d.get("uid") == self._uid:
+                return d
+        return None
+
+    @property
+    def name(self) -> str:
+        d = self._dev() or {}
+        return d.get("name") or d.get("hostname") or (d.get("mac") or d.get("ip") or self._uid)
 
     @property
     def source_type(self) -> SourceType:
         return SourceType.ROUTER
 
-    def _dev(self) -> Dict[str, Any]:
-        return (self.coordinator.devices_by_key or {}).get(self._key, {})
+    @property
+    def is_connected(self) -> bool:
+        d = self._dev() or {}
+        return not bool(d.get("derived", {}).get("stale"))
 
     @property
-    def mac_address(self) -> str | None:
-        mac = self._dev().get("mac")
-        return mac or None
-
-    @property
-    def ip_address(self) -> str | None:
-        ip = self._dev().get("ip")
+    def ip_address(self) -> Optional[str]:
+        d = self._dev() or {}
+        ip = d.get("ip") or ""
         return ip or None
 
     @property
-    def hostname(self) -> str | None:
-        d = self._dev()
-        return (d.get("name") or d.get("hostname") or d.get("ip") or self._key) or None
+    def mac_address(self) -> Optional[str]:
+        d = self._dev() or {}
+        mac = d.get("mac") or ""
+        return mac or None
 
     @property
-    def is_connected(self) -> bool:
-        # Treat "stale" as not connected; otherwise connected when present in latest scan.
-        d = self._dev()
-        if not d:
-            return False
-        return not bool((d.get("derived") or {}).get("stale", False))
-
-    @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        d = self._dev()
-        if not d:
-            return {}
-
-        # Keep attributes useful but not insane (avoid huge provider raw dumps).
-        derived = d.get("derived") or {}
+    def extra_state_attributes(self):
+        d = self._dev() or {}
+        deriv = d.get("derived") or {}
+        # Extended attributes live here (device_tracker can handle large attrs; recorder stores state, not attrs).
+        # Still, keep it sensible.
         return {
-            "key": self._key,
-            "ip": d.get("ip", ""),
-            "mac": d.get("mac", ""),
-            "hostname": d.get("hostname", ""),
-            "name": d.get("name", ""),
-            "desc": d.get("desc", ""),
-            "vendor": d.get("vendor", ""),
-            "device_type": d.get("device_type", "unknown"),
-            "wired": d.get("wired"),
-            "ssid": d.get("ssid", ""),
-            "vlan_id": d.get("vlan_id"),
-            "network_role": d.get("network_role", ""),
-            "interface": d.get("interface", ""),
-            "ap": d.get("ap", {}),
-            "switch": d.get("switch", {}),
-            "signal": d.get("signal", {}),
-            "bytes": d.get("bytes", {}),
-            "dhcp": d.get("dhcp", {}),
-            "sources": d.get("sources", []),
-            "first_seen": d.get("first_seen", ""),
-            "last_seen": d.get("last_seen", ""),
-            "new_device": bool(derived.get("new_device", False)),
-            "random_mac": bool(derived.get("random_mac", False)),
-            "stale": bool(derived.get("stale", False)),
+            "uid": d.get("uid"),
+            "ip": d.get("ip"),
+            "hostname": d.get("hostname"),
+            "vendor": d.get("vendor"),
+            "sources": d.get("sources") or [],
+            "name_override": d.get("name") or "",
+            "description": d.get("description") or "",
+            "first_seen": d.get("first_seen"),
+            "last_seen": d.get("last_seen"),
+            "new_device": bool(deriv.get("new_device")),
+            "stale": bool(deriv.get("stale")),
+            "random_mac": bool(deriv.get("random_mac")),
+            # provider blocks (only if present)
+            "opnsense": d.get("opnsense") or {},
+            "unifi": d.get("unifi") or {},
+            "adguard": d.get("adguard") or {},
         }
