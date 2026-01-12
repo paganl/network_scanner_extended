@@ -383,8 +383,10 @@ class ScanController:
             # ---------- UniFi enrichment (independent) ----------
             if self._unifi_enabled and self._unifi_url and self._unifi_user and self._unifi_pass:
                 try:
+                    self._unifi_token = _norm(opts.get(CONF_UNIFI_TOKEN) or data.get(CONF_UNIFI_TOKEN))
+
                     uc = UniFiClient(self._unifi_url, self._unifi_user, self._unifi_pass,
-                                     token=self._opts.get("unifi_token",""),
+                                     token=self._unifi_token,
                                      site=self._unifi_site, verify_tls=self._verify_tls)
                     clients = await uc.fetch_clients(self.hass)
                     devices = await uc.fetch_devices(self.hass)
@@ -523,7 +525,7 @@ class ScanController:
                     out[mk] = {"name": str(v), "desc": ""}
 
         opts = self._entry.options or {}
-        jtxt = _norm(opts.get("mac_directory_json_text"))
+        jtxt = _norm(opts.get(CONF_MAC_DIRECTORY_JSON_TEXT))
         if jtxt:
             try:
                 out.update(_parse_dir_obj(json.loads(jtxt)))
