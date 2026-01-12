@@ -30,6 +30,7 @@ from .const import (
     CONF_ADG_URL, CONF_ADG_USER, CONF_ADG_PASS,
     # UniFi
     CONF_UNIFI_ENABLED, CONF_UNIFI_URL, CONF_UNIFI_USER, CONF_UNIFI_PASS, CONF_UNIFI_SITE,
+    CONF_MAC_DIRECTORY_JSON_URL,
 )
 
 from .adguard import AdGuardDHCPClient
@@ -528,7 +529,7 @@ class ScanController:
             except Exception as exc:
                 _LOGGER.warning("Invalid directory JSON (options): %s", exc)
 
-        url = _norm(opts.get("mac_directory_json_url") or self._entry.data.get("mac_directory_json_url"))
+        url = _norm(opts.get("CONF_MAC_DIRECTORY_JSON_URL") or self._entry.data.get("CONF_MAC_DIRECTORY_JSON_URL"))
         if url:
             try:
                 session = async_get_clientsession(self.hass, verify_ssl=self._verify_tls)
