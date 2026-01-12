@@ -6,7 +6,7 @@ Fetches ARP/ND data from the OPNsense diagnostics API, preferring:
 Falls back to several GET endpoints for older firmware.
 
 Returns a list of normalised device dicts:
-  mac, ip, hostname, vendor, source="opnsense", opnsense={...}
+  mac, ip, hostname, vendor, opnsense={...}
 """
 
 from __future__ import annotations
@@ -216,7 +216,6 @@ class OPNsenseARPClient:
                 "ip": ip,
                 "hostname": host,
                 "vendor": vendor,
-                "source": "opnsense",
                 "opnsense": op_block,
             })
 
@@ -236,7 +235,6 @@ class OPNsenseARPClient:
                 "ip": ip,
                 "hostname": "",
                 "vendor": "",
-                "source": "opnsense",
                 "opnsense": {},
             })
         return devices
