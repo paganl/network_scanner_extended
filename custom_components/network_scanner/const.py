@@ -12,7 +12,8 @@ PROVIDER_OPNSENSE = "opnsense"
 PROVIDER_UNIFI = "unifi"
 PROVIDER_ADGUARD = "adguard"
 PROVIDER_OPNSENSE_UNIFI = "opnsense_unifi"
-CONF_MAC_DIRECTORY_JSON_URL = "mac_directory.json"
+CONF_MAC_DIRECTORY_JSON_URL = "mac_directory_json_url"
+CONF_MAC_DIRECTORY_JSON_TEXT = "mac_directory_json_text"
 
 PROVIDER_OPTIONS = [
     PROVIDER_OPNSENSE,
