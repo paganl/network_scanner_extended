@@ -184,7 +184,11 @@ async def async_get_devices(
             cur["hostname"] = host
 
         cur["mac"] = mac  # ensure cleaned
-        cur["adguard"]["from"] = "dhcp"
+        # keep "clients" if we already have it; otherwise mark as dhcp
+        cur.setdefault("adguard", {})
+        if cur["adguard"].get("from") != "clients":
+            cur["adguard"]["from"] = "dhcp"
+
         by_key[k] = cur
 
     out: List[Dict[str, Any]] = []
