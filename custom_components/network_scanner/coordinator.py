@@ -28,6 +28,8 @@ from .const import (
     CONF_UNIFI_URL, CONF_UNIFI_TOKEN, CONF_UNIFI_USER, CONF_UNIFI_PASS, CONF_UNIFI_SITE,
     # AdGuard
     CONF_ADGUARD_URL, CONF_ADGUARD_USER, CONF_ADGUARD_PASS,
+    CONF_MAC_DIRECTORY_JSON_URL, CONF_MAC_DIRECTORY_JSON_TEXT,
+
 )
 
 
@@ -157,34 +159,42 @@ class NetworkScannerCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
 
             raw_devices = await self._collect_raw_devices()
             merged = self._merge_and_enrich(raw_devices)
+            
+            # Load MAC directory overlay (optional)
             mac_dir = await self._load_mac_directory()
-
-            # --- Estimate ARP TTL from this sample (max expires of non-permanent entries) ---
-            op_ttl_guess_s: float | None = None
-            for _d in merged:
-                _op = _d.get("opnsense") or {}
-                _exp = _op.get("arp_expires_s")
-                _perm = _op.get("arp_permanent")
-                if isinstance(_exp, (int, float)) and _exp >= 0 and not _perm:
-                    op_ttl_guess_s = max(op_ttl_guess_s or 0.0, float(_exp))
-
-                mac = _norm_mac(d.get("mac"))
-                if mac and mac in mac_dir:
-                    meta = mac_dir[mac]
+            
+            # Apply directory overlay to merged devices (by MAC)
+            if mac_dir:
+                for d in merged:
+                    mac = _norm_mac(d.get("mac"))
+                    if not mac:
+                        continue
+                    meta = mac_dir.get(mac)
+                    if not meta:
+                        continue
+            
                     deriv = d.setdefault("derived", {})
-                
-                    # Keep directory values separate so you don't overwrite real hostnames / user notes
                     deriv["directory_name"] = (meta.get("name") or meta.get("display_name") or "").strip()
                     deriv["directory_desc"] = (meta.get("desc") or meta.get("description") or "").strip()
-                
-                    # Optional convenience: if hostname is empty, use directory name as hostname
+            
+                    # Optional: if hostname empty, use directory name
                     if deriv["directory_name"] and not (d.get("hostname") or "").strip():
                         d["hostname"] = deriv["directory_name"]
-
+            
+            # --- Estimate ARP TTL from this sample (max expires of non-permanent entries) ---
+            op_ttl_guess_s: float | None = None
+            for d in merged:
+                op = d.get("opnsense") or {}
+                exp = op.get("arp_expires_s")
+                perm = op.get("arp_permanent")
+                if isinstance(exp, (int, float)) and exp >= 0 and not perm:
+                    op_ttl_guess_s = max(op_ttl_guess_s or 0.0, float(exp))
+            
             if op_ttl_guess_s is None:
                 op_ttl_guess_s = ASSUMED_FALLBACK_ARP_TTL_S
+            
             _LOGGER.debug("Network Scanner: inferred ARP TTL ~ %.0fs", op_ttl_guess_s)
-
+               
             changed = False
 
             def _parse_iso(dt_str: str | None):
@@ -326,9 +336,9 @@ class NetworkScannerCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
     async def _load_mac_directory(self) -> dict[str, dict[str, Any]]:
         """Load directory overlay from JSON text or URL. Returns dict keyed by MAC."""
         # Prefer inline text if provided
-        raw_text = (self.options.get("mac_directory_json_text") or "").strip()
-        url = (self.options.get("mac_directory_json_url") or "").strip()
-    
+        raw_text = (self.options.get(CONF_MAC_DIRECTORY_JSON_TEXT) or "").strip()
+        url = (self.options.get(CONF_MAC_DIRECTORY_JSON_URL) or "").strip()
+
         data: Any = None
     
         if raw_text:
