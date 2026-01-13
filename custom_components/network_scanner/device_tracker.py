@@ -105,7 +105,7 @@ class NetworkScannerTracker(CoordinatorEntity, TrackerEntity):
         return DeviceInfo(
             # identifiers tie the device to THIS integration/config entry
             identifiers={(DOMAIN, mac)},
-            name=hostname or f"Device {mac}",
+            name = (deriv.get("directory_name") or d.get("hostname") or f"Device {mac}").strip(),
             manufacturer=vendor,
 
             # connections let HA link other integrations that also publish the same MAC
@@ -165,12 +165,23 @@ class NetworkScannerTracker(CoordinatorEntity, TrackerEntity):
             "first_seen": d.get("first_seen"),
             "last_seen": d.get("last_seen"),
             "derived": d.get("derived"),
+            "directory_name": deriv.get("directory_name"),
+            "directory_desc": deriv.get("directory_desc"),
+            
         }
 
     @property
     def name(self) -> str:
-        """Prefer hostname when available."""
-        host = self.hostname
+        d = self._find_device() or {}
+        deriv = d.get("derived") or {}
+    
+        dir_name = (deriv.get("directory_name") or "").strip()
+        if dir_name:
+            return f"NS {dir_name}"
+    
+        host = (d.get("hostname") or "").strip()
         if host:
             return f"NS {host}"
+    
         return self._attr_name
+
