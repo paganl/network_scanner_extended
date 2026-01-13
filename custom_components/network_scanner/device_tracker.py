@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import timedelta
-from typing import Any
+from typing import Any, Dict
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -143,22 +143,43 @@ class NetworkScannerTracker(CoordinatorEntity, TrackerEntity):
     def mac_address(self) -> str | None:
         return self._uid if ":" in self._uid and not self._uid.startswith("IP:") else None
 
+
     @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        dev = self._find_device() or {}
-        deriv = dev.get("derived") or {}
-        return {
-            "vendor": dev.get("vendor"),
-            "device_type": dev.get("device_type"),
-            "network_role": dev.get("network_role"),
-            "vlan_id": dev.get("vlan_id"),
-            "sources": dev.get("sources"),
-            "first_seen": dev.get("first_seen"),
-            "last_seen": dev.get("last_seen"),
+    def extra_state_attributes(self) -> Dict[str, Any]:
+        # Start with whatever the base TrackerEntity would normally expose (mac/ip/source_type, etc.)
+        base: Dict[str, Any] = {}
+        try:
+            base = dict(super().extra_state_attributes or {})  # type: ignore[attr-defined]
+        except Exception:
+            base = {}
+
+        d = self._find_device() or {}
+        mac = (d.get("mac") or "").upper() or None
+        ip = d.get("ip") or ((d.get("ips") or [None])[0])
+
+        deriv = d.get("derived") or {}
+
+        # Add/override with your integration-specific attributes
+        base.update({
+            # Explicitly expose MAC/IP for Lovelace tables
+            "mac": mac,
+            "ip": ip,
+            # Optional aliases (handy when cards expect these names)
+            "mac_address": mac,
+            "ip_address": ip,
+
+            "vendor": d.get("vendor"),
+            "device_type": d.get("device_type"),
+            "network_role": d.get("network_role"),
+            "vlan_id": d.get("vlan_id"),
+            "sources": d.get("sources"),
+            "first_seen": d.get("first_seen"),
+            "last_seen": d.get("last_seen"),
             "derived": deriv,
             "directory_name": deriv.get("directory_name"),
             "directory_desc": deriv.get("directory_desc"),
-        }
+        })
+        return base
 
     @property
     def name(self) -> str:
