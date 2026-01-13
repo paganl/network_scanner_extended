@@ -204,7 +204,9 @@ class NetworkScannerCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                     return None
 
             for d in merged:
-                key = d.get("mac") or (f"IP:{d['ips'][0]}" if d.get("ips") else None)
+                mac = _norm_mac(d.get("mac"))
+                key = mac or (f"IP:{d['ips'][0]}" if d.get("ips") else None)
+
                 if not key:
                     continue
 
