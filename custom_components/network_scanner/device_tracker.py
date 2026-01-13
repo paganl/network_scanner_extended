@@ -8,6 +8,8 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.device_registry import DeviceInfo
 
 # Try new-style TrackerEntity first, fall back for older cores
 try:
@@ -36,6 +38,16 @@ async def async_setup_entry(
         _LOGGER.error("Device tracker setup: no coordinator found for entry %s", entry.entry_id)
         return
 
+    # Create/ensure a hub device so client devices can use via_device=(DOMAIN, entry.entry_id)
+    dev_reg = dr.async_get(hass)
+    dev_reg.async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, entry.entry_id)},
+        name="Network Scanner",
+        manufacturer="Network Scanner Extended",
+        model="Coordinator",
+    )
+
     devices = (coordinator.data or {}).get("devices") or []
     _LOGGER.debug("Device tracker setup: creating %d trackers", len(devices))
 
@@ -53,15 +65,17 @@ class NetworkScannerTracker(CoordinatorEntity, TrackerEntity):
     """A simple presence tracker for a network device."""
 
     _attr_should_poll = False
-    _attr_source_type = SourceType.ROUTER  # shows as router-sourced in HA
+    _attr_source_type = SourceType.ROUTER
 
     def __init__(self, coordinator, entry: ConfigEntry, uid: str) -> None:
         super().__init__(coordinator)
         self._entry = entry
         self._uid = uid
+
+        # Keep unique_id stable: entry-scoped + uid (MAC preferred; IP fallback)
         self._attr_unique_id = f"{entry.entry_id}:{uid}"
 
-        # Name: hostname if we have it, else uid
+        # Default name; we'll override via name property when hostname is available
         self._attr_name = f"NS {uid}"
 
     def _find_device(self) -> dict[str, Any] | None:
@@ -74,6 +88,32 @@ class NetworkScannerTracker(CoordinatorEntity, TrackerEntity):
         return None
 
     @property
+    def device_info(self) -> DeviceInfo | None:
+        """Register/link a HA Device so entities group like Netgear does."""
+        d = self._find_device() or {}
+        mac = (d.get("mac") or "").upper()
+
+        # Only create a device if we have a MAC; IP-only entries cannot reliably link across integrations
+        if not mac:
+            return None
+
+        hostname = (d.get("hostname") or "").strip()
+        vendor = (d.get("vendor") or "").strip() or "Unknown"
+
+        return DeviceInfo(
+            # identifiers tie the device to THIS integration/config entry
+            identifiers={(DOMAIN, mac)},
+            name=hostname or f"Device {mac}",
+            manufacturer=vendor,
+
+            # connections let HA link other integrations that also publish the same MAC
+            connections={(dr.CONNECTION_NETWORK_MAC, mac)},
+
+            # Show the client as "behind" the Network Scanner hub
+            via_device=(DOMAIN, self._entry.entry_id),
+        )
+
+    @property
     def is_connected(self) -> bool:
         # If it exists in the current coordinator snapshot, treat as connected
         return self._find_device() is not None
@@ -81,7 +121,8 @@ class NetworkScannerTracker(CoordinatorEntity, TrackerEntity):
     @property
     def hostname(self) -> str | None:
         d = self._find_device() or {}
-        return (d.get("hostname") or None)
+        v = (d.get("hostname") or "").strip()
+        return v or None
 
     @property
     def ip_address(self) -> str | None:
@@ -90,7 +131,7 @@ class NetworkScannerTracker(CoordinatorEntity, TrackerEntity):
 
     @property
     def mac_address(self) -> str | None:
-        # Only return a mac if this UID is a MAC
+        # Only return a MAC if this UID is a MAC
         return self._uid if ":" in self._uid and not self._uid.startswith("IP:") else None
 
     @property
@@ -109,8 +150,8 @@ class NetworkScannerTracker(CoordinatorEntity, TrackerEntity):
 
     @property
     def name(self) -> str:
-        d = self._find_device() or {}
-        host = (d.get("hostname") or "").strip()
+        """Prefer hostname when available."""
+        host = self.hostname
         if host:
             return f"NS {host}"
         return self._attr_name
