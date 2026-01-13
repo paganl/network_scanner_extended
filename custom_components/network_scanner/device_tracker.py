@@ -1,6 +1,8 @@
 """Device tracker platform for Network Scanner."""
 
 from __future__ import annotations
+from datetime import timedelta
+from homeassistant.util import dt as dt_util
 
 import logging
 from typing import Any
@@ -112,12 +114,29 @@ class NetworkScannerTracker(CoordinatorEntity, TrackerEntity):
             # Show the client as "behind" the Network Scanner hub
             via_device=(DOMAIN, self._entry.entry_id),
         )
-
+    
+    CONNECTED_TTL = timedelta(minutes=5)  # tweak to taste
+    
     @property
     def is_connected(self) -> bool:
-        # If it exists in the current coordinator snapshot, treat as connected
-        return self._find_device() is not None
+        """Connected if last_seen is within CONNECTED_TTL."""
+        d = self._find_device() or {}
 
+    last_seen = d.get("last_seen")
+    if not last_seen:
+        return False
+
+    dt = dt_util.parse_datetime(last_seen)
+    if dt is None:
+        return False
+
+    dt = dt_util.as_utc(dt)
+    return (dt_util.utcnow() - dt) <= CONNECTED_TTL
+
+    @property
+    def state(self) -> str:
+        return "home" if self.is_connected else "not_home"
+    
     @property
     def hostname(self) -> str | None:
         d = self._find_device() or {}
