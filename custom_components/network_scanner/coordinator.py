@@ -5,6 +5,9 @@ from __future__ import annotations
 import logging
 from datetime import timedelta
 from typing import Any, Dict, List
+import json
+import re
+from aiohttp import ClientError
 
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
@@ -49,12 +52,21 @@ async def async_unload_coordinator(hass: HomeAssistant, entry: ConfigEntry) -> b
     # DO NOT unload platforms here (done in __init__.py)
     hass.data[DOMAIN].pop(entry.entry_id, None)
     return True
+    
+_MAC_RE = re.compile(r"^[0-9A-F]{2}(:[0-9A-F]{2}){5}$", re.IGNORECASE)
+
+def _norm_mac(v: str | None) -> str:
+    m = (v or "").strip().upper()
+    return m if _MAC_RE.match(m) else ""
 
 
 class NetworkScannerCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         self.hass = hass
         self.entry = entry
+        self._mac_dir: dict[str, dict[str, Any]] = {}
+        self._mac_dir_loaded_utc: str | None = None
+
         raw = dict(entry.options or entry.data or {})
         self.options = {**DEFAULT_OPTIONS, **raw}
 
@@ -145,6 +157,7 @@ class NetworkScannerCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
 
             raw_devices = await self._collect_raw_devices()
             merged = self._merge_and_enrich(raw_devices)
+            mac_dir = await self._load_mac_directory()
 
             # --- Estimate ARP TTL from this sample (max expires of non-permanent entries) ---
             op_ttl_guess_s: float | None = None
@@ -154,6 +167,20 @@ class NetworkScannerCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                 _perm = _op.get("arp_permanent")
                 if isinstance(_exp, (int, float)) and _exp >= 0 and not _perm:
                     op_ttl_guess_s = max(op_ttl_guess_s or 0.0, float(_exp))
+
+                mac = _norm_mac(d.get("mac"))
+                if mac and mac in mac_dir:
+                    meta = mac_dir[mac]
+                    deriv = d.setdefault("derived", {})
+                
+                    # Keep directory values separate so you don't overwrite real hostnames / user notes
+                    deriv["directory_name"] = (meta.get("name") or meta.get("display_name") or "").strip()
+                    deriv["directory_desc"] = (meta.get("desc") or meta.get("description") or "").strip()
+                
+                    # Optional convenience: if hostname is empty, use directory name as hostname
+                    if deriv["directory_name"] and not (d.get("hostname") or "").strip():
+                        d["hostname"] = deriv["directory_name"]
+
             if op_ttl_guess_s is None:
                 op_ttl_guess_s = ASSUMED_FALLBACK_ARP_TTL_S
             _LOGGER.debug("Network Scanner: inferred ARP TTL ~ %.0fs", op_ttl_guess_s)
@@ -296,7 +323,60 @@ class NetworkScannerCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
     
         return out
 
+    async def _load_mac_directory(self) -> dict[str, dict[str, Any]]:
+        """Load directory overlay from JSON text or URL. Returns dict keyed by MAC."""
+        # Prefer inline text if provided
+        raw_text = (self.options.get("mac_directory_json_text") or "").strip()
+        url = (self.options.get("mac_directory_json_url") or "").strip()
+    
+        data: Any = None
+    
+        if raw_text:
+            try:
+                data = json.loads(raw_text)
+            except Exception as exc:
+                _LOGGER.warning("MAC directory JSON text is invalid: %s", exc)
+                return {}
+    
+        elif url:
+            try:
+                async with self.session.get(url, ssl=bool(self.options.get("verify_ssl", True))) as r:
+                    if r.status != 200:
+                        _LOGGER.warning("MAC directory URL returned HTTP %s", r.status)
+                        return {}
+                    data = await r.json(content_type=None)
+            except (ClientError, Exception) as exc:
+                _LOGGER.warning("MAC directory URL fetch failed: %s", exc)
+                return {}
+    
+        else:
+            return {}
+    
+        out: dict[str, dict[str, Any]] = {}
+    
+        # Support either:
+        # 1) {"AA:BB:...": {"name": "...", "desc": "..."}}
+        # 2) [{"mac":"AA:BB:...","name":"...","desc":"..."}]
+        if isinstance(data, dict):
+            for mac, meta in data.items():
+                m = _norm_mac(str(mac))
+                if not m or not isinstance(meta, dict):
+                    continue
+                out[m] = meta
+    
+        elif isinstance(data, list):
+            for row in data:
+                if not isinstance(row, dict):
+                    continue
+                m = _norm_mac(row.get("mac"))
+                if not m:
+                    continue
+                out[m] = row
+    
+        _LOGGER.debug("MAC directory loaded: %d entries", len(out))
+        return out
 
+    
     # ---------------- merge + derive ----------------
 
     def _merge_and_enrich(self, src: Dict[str, List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
