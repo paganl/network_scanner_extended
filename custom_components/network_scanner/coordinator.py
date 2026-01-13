@@ -353,6 +353,10 @@ class NetworkScannerCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         if raw_text:
             try:
                 data = json.loads(raw_text)
+                _LOGGER.debug("MAC directory raw type=%s keys/sample=%s",
+                      type(data).__name__,
+                      list(data.keys())[:5] if isinstance(data, dict) else (data[:1] if isinstance(data, list) else str(data)[:200]))
+
             except Exception as exc:
                 _LOGGER.warning("MAC directory JSON text is invalid: %s", exc)
                 return {}
@@ -364,6 +368,10 @@ class NetworkScannerCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                         _LOGGER.warning("MAC directory URL returned HTTP %s", r.status)
                         return {}
                     data = await r.json(content_type=None)
+                    _LOGGER.debug("MAC directory raw type=%s keys/sample=%s",
+                          type(data).__name__,
+                          list(data.keys())[:5] if isinstance(data, dict) else (data[:1] if isinstance(data, list) else str(data)[:200]))
+
             except (ClientError, Exception) as exc:
                 _LOGGER.warning("MAC directory URL fetch failed: %s", exc)
                 return {}
