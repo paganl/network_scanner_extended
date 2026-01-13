@@ -247,15 +247,22 @@ class NetworkScannerCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                         cand_ts.append(seen_ts)
                         last_seen_source = "opnsense"
 
-                # 3) Previous store to avoid regressions
+                # 3) AdGuard "clients" is the only real "active-ish" signal when using AdGuard only
+                adg = d.get("adguard") or {}
+                if adg.get("from") == "clients":
+                    cand_ts.append(now_ts)
+                    last_seen_source = "adguard"
+
+                # 4) Keep previous store to avoid regressions
                 if prev_last_dt:
                     cand_ts.append(prev_last_dt.timestamp())
 
-                # 4) Fallback: we did see it in this cycle
+                # 5) Absolute fallback: if we have no signal at all, don't invent recency
+                # (If you *do* want everything to look online, you can append now_ts here – but it lies.)
                 if not cand_ts:
                     cand_ts.append(now_ts)
                     last_seen_source = "fallback"
-
+                    
                 final_last_seen_iso = dt_util.utc_from_timestamp(max(cand_ts)).isoformat()
                 deriv["last_seen_source"] = last_seen_source
 
